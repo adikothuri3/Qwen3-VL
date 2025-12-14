@@ -1,0 +1,105 @@
+# Qwen3-VL Project Cursor Rules
+
+## Project Context
+This is the Qwen3-VL repository - a vision-language model (VLM) project that handles multimodal AI tasks including:
+- Image and video understanding
+- OCR and document parsing
+- Spatial understanding and grounding (2D/3D)
+- Visual coding and agent capabilities
+- Long context processing (up to 1M tokens)
+
+## Technology Stack
+- **Primary**: Python, PyTorch, Transformers (Hugging Face)
+- **Key Libraries**: transformers >= 4.57.0, torch, torchvision, accelerate, qwen-vl-utils
+- **Deployment**: vLLM, SGLang, Gradio for web demos
+- **Notebooks**: Jupyter notebooks in cookbooks/ for examples
+
+## Coding Style & Preferences
+
+### Python Style
+- Follow PEP 8 conventions
+- Use type hints where appropriate, especially for function parameters and returns
+- Prefer descriptive variable names (e.g., `generated_ids_trimmed` over `gen_ids`)
+- Use f-strings for string formatting
+- Keep functions focused and single-purpose
+
+### Code Organization
+- Place test/example scripts in `src/` directory
+- Keep cookbook examples in `cookbooks/` as Jupyter notebooks
+- Utility functions should be in appropriate `utils/` directories
+- Model-related code follows transformers patterns
+
+### Common Patterns
+
+#### Model Loading
+```python
+from transformers import AutoModelForImageTextToText, AutoProcessor
+
+model = AutoModelForImageTextToText.from_pretrained(
+    model_id, 
+    dtype="auto", 
+    device_map="auto"
+)
+processor = AutoProcessor.from_pretrained(model_id)
+```
+
+#### Message Format
+- Use the standard message format with `role` and `content` fields
+- Support `image`, `video`, and `text` content types
+- Always use `processor.apply_chat_template()` for formatting
+
+#### Device Management
+- Check CUDA availability: `device = "cuda" if torch.cuda.is_available() else "cpu"`
+- Move inputs to device: `inputs = inputs.to(model.device)`
+- Use `torch.no_grad()` for inference
+
+### Error Handling
+- Remove `token_type_ids` if present: `inputs.pop("token_type_ids", None)`
+- Handle batch vs single inference appropriately
+- Set `padding_side='left'` for batch generation
+
+### Documentation
+- Add clear comments for complex operations (e.g., pixel budget calculations, video processing)
+- Include print statements for debugging multi-step processes
+- Document model-specific parameters (e.g., `image_patch_size=16` for Qwen3-VL)
+
+## Development Workflow
+
+### When Adding Features
+1. Check existing cookbooks for similar patterns
+2. Follow transformers API conventions
+3. Test with small examples first
+4. Consider memory constraints (GPU VRAM)
+
+### When Modifying Code
+- Preserve backward compatibility when possible
+- Update related cookbooks if API changes
+- Test with both image and video inputs if applicable
+
+### Testing
+- Use small models (2B, 4B) for quick testing
+- Test on both CPU and CUDA when possible
+- Verify output formatting matches expected structure
+
+## File Naming
+- Python scripts: `snake_case.py`
+- Notebooks: `descriptive_name.ipynb`
+- Test files: `test_*.py` or `*_testing.py`
+
+## Dependencies
+- Always specify minimum versions for critical dependencies (e.g., `transformers>=4.57.0`)
+- Use `requirements*.txt` files for different use cases
+- Document optional dependencies (e.g., flash-attn, decord)
+
+## Git Practices
+- Commit messages should be clear and descriptive
+- Group related changes together
+- Don't commit large model files or checkpoints
+
+## Special Considerations
+- This project handles large models - be mindful of memory usage
+- Support both local file paths and URLs for images/videos
+- Handle multiple visual inputs (images + videos) in same conversation
+- Consider pixel budgets and token limits when processing visual content
+- Support both Instruct and Thinking model variants
+
