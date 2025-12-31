@@ -1,3 +1,11 @@
+# IMPORTANT: Import transformers_redirect FIRST before any transformers imports
+import sys
+from pathlib import Path
+
+project_root = Path(__file__).parent.parent.parent.parent.parent
+sys.path.insert(0, str(project_root))
+import transformers_redirect  # noqa: F401
+
 import json
 import random
 import logging

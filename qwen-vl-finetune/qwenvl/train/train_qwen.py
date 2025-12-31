@@ -14,13 +14,19 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
+# IMPORTANT: Import transformers_redirect FIRST before any transformers imports
+import sys
+from pathlib import Path
+
+project_root = Path(__file__).parent.parent.parent.parent
+sys.path.insert(0, str(project_root))
+import transformers_redirect  # noqa: F401
+
 import os
 import logging
 import pathlib
 import torch
 import transformers
-import sys
-from pathlib import Path
 
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
