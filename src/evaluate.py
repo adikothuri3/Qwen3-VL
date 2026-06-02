@@ -1,8 +1,11 @@
 """
 Qwen3-VL Evaluation & Profiling Script
 
-A comprehensive evaluation script for Qwen3-VL models that automatically runs
-detailed bottleneck profiling after every inference run. Each run produces:
+Loads the model from local_transformers/ so any edits to the model source are
+immediately reflected at runtime. On startup, the script prints the exact file
+the model class was loaded from — use this to confirm local code is active.
+
+Each run produces a timestamped directory under --output-dir containing:
 
   Evaluation outputs:
     - evaluation_metrics.json   (per-sample timing & output data)
@@ -13,21 +16,32 @@ detailed bottleneck profiling after every inference run. Each run produces:
     - profile_chart.png         (5-panel matplotlib visualisation)
     - trace_<timestamp>.json    (Chrome trace, viewable at chrome://tracing)
     - tensorboard/              (optional, if --tensorboard is passed)
-
-All files are saved to a timestamped subdirectory under --output-dir.
 """
 
 import sys
 from pathlib import Path
 
-# Add local_transformers to path and redirect transformers imports
+# ── local_transformers redirect ───────────────────────────────────────────────
+# Must happen before any other import that touches transformers.
+# Imports the model class directly from the local source file so edits are
+# guaranteed to be reflected without needing to reinstall anything.
 _project_root = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(_project_root))
 
-import local_transformers as transformers
+import local_transformers
+sys.modules["transformers"] = local_transformers
 
-sys.modules["transformers"] = transformers
+# Direct import from local source — this is what makes your edits take effect.
+from local_transformers.models.qwen3_vl.modeling_qwen3_vl import (
+    Qwen3VLForConditionalGeneration,
+)
+from local_transformers.models.qwen3_vl.processing_qwen3_vl import Qwen3VLProcessor
 
+import inspect
+_model_source = inspect.getfile(Qwen3VLForConditionalGeneration)
+print(f"[local_transformers] Model loaded from: {_model_source}")
+
+# ── standard library & third-party imports ────────────────────────────────────
 import argparse
 import json
 import re
@@ -42,7 +56,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from tqdm import tqdm
-from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -119,7 +132,7 @@ class ComponentTiming:
 
 
 class Qwen3VLEvaluator:
-    """Evaluator class for Qwen3-VL models."""
+    """Loads and evaluates a Qwen3-VL model using local_transformers source."""
 
     def __init__(
         self,
@@ -134,44 +147,41 @@ class Qwen3VLEvaluator:
         self.device_map = device_map
 
         print("=== Initializing Qwen3-VL Evaluator ===")
-        print(f"Model ID: {model_id}")
-        print(f"Device: {self.device}")
-        print(f"Data Type: {self.dtype}")
+        print(f"Model ID:  {model_id}")
+        print(f"Device:    {self.device}")
+        print(f"Dtype:     {self.dtype}")
 
         self.model: Any = None
         self.processor: Any = None
         self._load_model()
         self._load_processor()
 
-    def _load_model(self):
-        """Load the model."""
+    def _load_model(self) -> None:
         print("\n=== Loading Model ===")
-        start_time = time.time()
+        start = time.time()
 
-        model_kwargs = {
-            "dtype": getattr(torch, self.dtype) if self.dtype != "auto" else "auto",
-        }
+        torch_dtype = getattr(torch, self.dtype) if self.dtype != "auto" else "auto"
+        model_kwargs: Dict[str, Any] = {"dtype": torch_dtype}
 
         if self.device_map:
             model_kwargs["device_map"] = self.device_map
+            self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+                self.model_id, **model_kwargs
+            )
         else:
-            model = Qwen3VLForConditionalGeneration.from_pretrained(self.model_id, **model_kwargs)
-            model.to(self.device)
-            self.model = model
+            self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+                self.model_id, **model_kwargs
+            )
+            self.model.to(self.device)
 
-        if not self.device_map:
-            self.model.eval()
+        self.model.eval()
+        print(f"Model loaded in {time.time() - start:.2f}s")
 
-        load_time = time.time() - start_time
-        print(f"Model loaded in {load_time:.2f} seconds")
-
-    def _load_processor(self):
-        """Load the processor."""
+    def _load_processor(self) -> None:
         print("\n=== Loading Processor ===")
-        start_time = time.time()
-        self.processor = AutoProcessor.from_pretrained(self.model_id)
-        load_time = time.time() - start_time
-        print(f"Processor loaded in {load_time:.2f} seconds")
+        start = time.time()
+        self.processor = Qwen3VLProcessor.from_pretrained(self.model_id)
+        print(f"Processor loaded in {time.time() - start:.2f}s")
 
     def run_inference(
         self,
@@ -185,6 +195,9 @@ class Qwen3VLEvaluator:
         output_text = ""
         error_message = None
         success = True
+        preprocessing_time = generation_time = decoding_time = 0.0
+        input_tokens = output_tokens = 0
+        tokens_per_second = 0.0
 
         try:
             preprocess_start = time.time()
@@ -212,7 +225,7 @@ class Qwen3VLEvaluator:
 
             decode_start = time.time()
             generated_ids_trimmed = [
-                out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
+                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
             ]
             output_text = self.processor.batch_decode(
                 generated_ids_trimmed,
@@ -222,26 +235,18 @@ class Qwen3VLEvaluator:
             decoding_time = time.time() - decode_start
 
             output_tokens = len(generated_ids_trimmed[0])
-            tokens_per_second = output_tokens / generation_time if generation_time > 0 else 0
-            total_time = time.time() - total_start
+            tokens_per_second = output_tokens / generation_time if generation_time > 0 else 0.0
 
         except Exception as e:
             success = False
             error_message = str(e)
-            preprocessing_time = 0
-            generation_time = 0
-            decoding_time = 0
-            total_time = time.time() - total_start
-            input_tokens = 0
-            output_tokens = 0
-            tokens_per_second = 0
 
         return InferenceMetrics(
             sample_id=sample_id,
             preprocessing_time=preprocessing_time,
             generation_time=generation_time,
             decoding_time=decoding_time,
-            total_time=total_time,
+            total_time=time.time() - total_start,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             tokens_per_second=tokens_per_second,
@@ -259,33 +264,31 @@ class Qwen3VLEvaluator:
         temperature: float = 0.1,
         show_progress: bool = True,
     ) -> List[InferenceMetrics]:
-        """Run inference on a batch of test cases."""
+        """Run inference on a list of test cases."""
         results: List[InferenceMetrics] = []
         iterator = tqdm(test_cases, desc="Evaluating") if show_progress else test_cases
-
         for test_case in iterator:
             sample_id = test_case.get("sample_id", f"sample_{len(results)}")
-            messages = test_case["messages"]
-            metrics = self.run_inference(
-                messages=messages,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                sample_id=sample_id,
+            results.append(
+                self.run_inference(
+                    messages=test_case["messages"],
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    sample_id=sample_id,
+                )
             )
-            results.append(metrics)
-
         return results
 
     def compute_summary(self, metrics_list: List[InferenceMetrics]) -> EvaluationSummary:
-        """Compute summary statistics from a list of metrics."""
-        successful_metrics = [m for m in metrics_list if m.success]
-        failed_metrics = [m for m in metrics_list if not m.success]
+        """Compute aggregate statistics from a list of per-sample metrics."""
+        successful = [m for m in metrics_list if m.success]
+        failed = [m for m in metrics_list if not m.success]
 
-        if not successful_metrics:
+        if not successful:
             return EvaluationSummary(
                 total_samples=len(metrics_list),
                 successful_samples=0,
-                failed_samples=len(failed_metrics),
+                failed_samples=len(failed),
                 avg_preprocessing_time=0,
                 avg_generation_time=0,
                 avg_decoding_time=0,
@@ -298,27 +301,21 @@ class Qwen3VLEvaluator:
                 p99_generation_time=0,
             )
 
-        generation_times = [m.generation_time for m in successful_metrics]
-        generation_times_sorted = sorted(generation_times)
-
+        gen_times = sorted(m.generation_time for m in successful)
         return EvaluationSummary(
             total_samples=len(metrics_list),
-            successful_samples=len(successful_metrics),
-            failed_samples=len(failed_metrics),
-            avg_preprocessing_time=statistics.mean([m.preprocessing_time for m in successful_metrics]),
-            avg_generation_time=statistics.mean(generation_times),
-            avg_decoding_time=statistics.mean([m.decoding_time for m in successful_metrics]),
-            avg_total_time=statistics.mean([m.total_time for m in successful_metrics]),
-            avg_tokens_per_second=statistics.mean([m.tokens_per_second for m in successful_metrics]),
-            total_tokens_generated=sum([m.output_tokens for m in successful_metrics]),
-            total_time=sum([m.total_time for m in metrics_list]),
-            median_generation_time=statistics.median(generation_times),
-            p95_generation_time=generation_times_sorted[int(len(generation_times_sorted) * 0.95)]
-            if generation_times_sorted
-            else 0,
-            p99_generation_time=generation_times_sorted[int(len(generation_times_sorted) * 0.99)]
-            if generation_times_sorted
-            else 0,
+            successful_samples=len(successful),
+            failed_samples=len(failed),
+            avg_preprocessing_time=statistics.mean(m.preprocessing_time for m in successful),
+            avg_generation_time=statistics.mean(gen_times),
+            avg_decoding_time=statistics.mean(m.decoding_time for m in successful),
+            avg_total_time=statistics.mean(m.total_time for m in successful),
+            avg_tokens_per_second=statistics.mean(m.tokens_per_second for m in successful),
+            total_tokens_generated=sum(m.output_tokens for m in successful),
+            total_time=sum(m.total_time for m in metrics_list),
+            median_generation_time=statistics.median(gen_times),
+            p95_generation_time=gen_times[int(len(gen_times) * 0.95)] if gen_times else 0,
+            p99_generation_time=gen_times[int(len(gen_times) * 0.99)] if gen_times else 0,
         )
 
 
@@ -351,36 +348,34 @@ class HookProfiler:
         "Qwen3VLForConditionalGeneration",
     )
 
-    def __init__(self, model: torch.nn.Module, device: str):
+    def __init__(self, model: torch.nn.Module, device: str) -> None:
         self.device = device
         self.timings: Dict[str, ComponentTiming] = {}
         self._handles: list = []
         self._stack: list = []
         self._register_hooks(model)
 
-    def _register_hooks(self, model: torch.nn.Module):
+    def _register_hooks(self, model: torch.nn.Module) -> None:
         for name, mod in model.named_modules():
             cls_name = type(mod).__name__
             if cls_name in self._TARGET_CLASSES:
                 label = f"{name} ({cls_name})" if name else cls_name
                 self.timings[label] = ComponentTiming(name=label)
-                h1 = mod.register_forward_pre_hook(self._make_pre_hook(label))
-                h2 = mod.register_forward_hook(self._make_post_hook(label))
-                self._handles.extend([h1, h2])
+                self._handles.append(mod.register_forward_pre_hook(self._make_pre_hook(label)))
+                self._handles.append(mod.register_forward_hook(self._make_post_hook(label)))
 
-    def _sync(self):
+    def _sync(self) -> None:
         if self.device == "cuda":
             torch.cuda.synchronize()
 
     def _make_pre_hook(self, label: str):
-        def hook(_module, _input):
+        def hook(_module: Any, _input: Any) -> None:
             self._sync()
             self._stack.append((label, time.perf_counter()))
-
         return hook
 
     def _make_post_hook(self, label: str):
-        def hook(_module, _input, _output):
+        def hook(_module: Any, _input: Any, _output: Any) -> None:
             self._sync()
             end = time.perf_counter()
             while self._stack and self._stack[-1][0] != label:
@@ -390,16 +385,15 @@ class HookProfiler:
                 elapsed_ms = (end - start) * 1000
                 self.timings[label].total_ms += elapsed_ms
                 self.timings[label].call_count += 1
-
         return hook
 
-    def reset(self):
+    def reset(self) -> None:
         for t in self.timings.values():
             t.total_ms = 0.0
             t.call_count = 0
         self._stack.clear()
 
-    def remove_hooks(self):
+    def remove_hooks(self) -> None:
         for h in self._handles:
             h.remove()
         self._handles.clear()
@@ -417,8 +411,8 @@ class HookProfiler:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _run_once(model, processor, messages, device, max_new_tokens):
-    """Single inference pass (no profiling instrumentation)."""
+def _run_once(model: Any, processor: Any, messages: List[Dict[str, Any]], device: str, max_new_tokens: int) -> None:
+    """Single inference pass with no instrumentation (used for warmup)."""
     inputs = processor.apply_chat_template(
         messages,
         tokenize=True,
@@ -433,8 +427,8 @@ def _run_once(model, processor, messages, device, max_new_tokens):
 
 
 def run_profile(
-    model,
-    processor,
+    model: Any,
+    processor: Any,
     messages: List[Dict[str, Any]],
     device: str,
     max_new_tokens: int = 128,
@@ -443,22 +437,16 @@ def run_profile(
     warmup_runs: int = 1,
     output_dir: Optional[Path] = None,
 ) -> ProfileResult:
-    """
-    Run inference with hook-based profiling and (optionally) torch.profiler.
-
-    Returns a ProfileResult with all timing data.
-    """
+    """Run inference with hook-based profiling and optionally torch.profiler."""
     result = ProfileResult()
     trace_output_dir = Path(output_dir) if output_dir else Path("results")
     trace_output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── warmup ───────────────────────────────────────────────────────────────
     print(f"\n=== Profiler Warmup ({warmup_runs} run(s)) ===")
     for i in range(warmup_runs):
         _run_once(model, processor, messages, device, max_new_tokens)
         print(f"  warmup {i + 1}/{warmup_runs} done")
 
-    # ── hook-based profiling ─────────────────────────────────────────────────
     print("\n=== Hook-based component profiling ===")
     hook_profiler = HookProfiler(model, device)
     hook_profiler.reset()
@@ -490,40 +478,35 @@ def run_profile(
     result.generation_ms = (time.perf_counter() - t1) * 1000
 
     t2 = time.perf_counter()
-    trimmed = [out[len(inp) :] for inp, out in zip(inputs["input_ids"], generated_ids)]
+    trimmed = [out[len(inp):] for inp, out in zip(inputs["input_ids"], generated_ids)]
     output_text = processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
     result.decoding_ms = (time.perf_counter() - t2) * 1000
 
     result.output_tokens = len(trimmed[0])
     result.total_ms = result.preprocessing_ms + result.generation_ms + result.decoding_ms
-    result.tokens_per_second = result.output_tokens / (result.generation_ms / 1000) if result.generation_ms > 0 else 0
+    result.tokens_per_second = result.output_tokens / (result.generation_ms / 1000) if result.generation_ms > 0 else 0.0
     result.component_timings = hook_profiler.summary_dict()
     hook_profiler.remove_hooks()
 
     print(f"  Output ({result.output_tokens} tokens): {output_text[:120]}...")
 
-    # ── torch.profiler pass ──────────────────────────────────────────────────
     if use_torch_profiler:
         print("\n=== torch.profiler pass (separate inference) ===")
         activities = [torch.profiler.ProfilerActivity.CPU]
         if device == "cuda":
             activities.append(torch.profiler.ProfilerActivity.CUDA)
 
-        schedule = torch.profiler.schedule(wait=0, warmup=1, active=1, repeat=1)
-
-        tb_handler = None
-        if tensorboard_dir:
-            tb_handler = torch.profiler.tensorboard_trace_handler(tensorboard_dir)
+        tb_handler = torch.profiler.tensorboard_trace_handler(tensorboard_dir) if tensorboard_dir else None
 
         with torch.profiler.profile(
             activities=activities,
-            schedule=schedule,
+            schedule=torch.profiler.schedule(wait=0, warmup=1, active=1, repeat=1),
             on_trace_ready=tb_handler,
             record_shapes=True,
             profile_memory=True,
             with_stack=True,
         ) as prof:
-            for _step in range(2):
+            for _ in range(2):
                 _run_once(model, processor, messages, device, max_new_tokens)
                 prof.step()
 
@@ -534,19 +517,16 @@ def run_profile(
         prof.export_chrome_trace(str(trace_path))
         result.trace_path = str(trace_path)
         print(f"  Chrome trace saved to {trace_path}")
-        if tensorboard_dir:
-            print(f"  TensorBoard logs saved to {tensorboard_dir}/")
 
     return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  5. Visualisation (matplotlib)
+#  5. Visualisation
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _extract_components(timings: dict, class_filter: list) -> dict:
-    """Extract component timings matching class names, aggregate by class."""
+def _extract_components(timings: dict, class_filter: List[str]) -> Dict[str, float]:
     agg: Dict[str, float] = defaultdict(float)
     for key, val in timings.items():
         for cls in class_filter:
@@ -558,47 +538,38 @@ def _extract_components(timings: dict, class_filter: list) -> dict:
 
 
 def _extract_layer_breakdown(timings: dict):
-    """Extract per-layer attention and MLP times from the text decoder."""
     attn_by_layer: Dict[int, float] = {}
     mlp_by_layer: Dict[int, float] = {}
-
     for key, val in timings.items():
+        layer_idx = _parse_layer_index(key)
+        if layer_idx is None:
+            continue
         if "Qwen3VLTextAttention" in key:
-            layer_idx = _parse_layer_index(key)
-            if layer_idx is not None:
-                attn_by_layer[layer_idx] = attn_by_layer.get(layer_idx, 0) + val["total_ms"]
+            attn_by_layer[layer_idx] = attn_by_layer.get(layer_idx, 0) + val["total_ms"]
         elif "Qwen3VLTextMLP" in key:
-            layer_idx = _parse_layer_index(key)
-            if layer_idx is not None:
-                mlp_by_layer[layer_idx] = mlp_by_layer.get(layer_idx, 0) + val["total_ms"]
+            mlp_by_layer[layer_idx] = mlp_by_layer.get(layer_idx, 0) + val["total_ms"]
 
     if not attn_by_layer:
         return [], [], []
-
-    all_layers = sorted(set(attn_by_layer.keys()) | set(mlp_by_layer.keys()))
-    attn_times = [attn_by_layer.get(i, 0) for i in all_layers]
-    mlp_times = [mlp_by_layer.get(i, 0) for i in all_layers]
-    labels = [f"L{i}" for i in all_layers]
-    return attn_times, mlp_times, labels
+    all_layers = sorted(set(attn_by_layer) | set(mlp_by_layer))
+    return (
+        [attn_by_layer.get(i, 0) for i in all_layers],
+        [mlp_by_layer.get(i, 0) for i in all_layers],
+        [f"L{i}" for i in all_layers],
+    )
 
 
 def _parse_layer_index(key: str) -> Optional[int]:
-    """Extract layer index from a hook key like 'model.language_model.layers.5.self_attn (...)'."""
     match = re.search(r"layers\.(\d+)\.", key)
-    if match:
-        return int(match.group(1))
-    return None
+    return int(match.group(1)) if match else None
 
 
 def plot_profile(result: ProfileResult, output_dir: Path) -> Path:
-    """Generate the 5-panel profiling chart and save to output_dir."""
     output_dir.mkdir(parents=True, exist_ok=True)
-
     fig = plt.figure(figsize=(22, 16), constrained_layout=True)
     fig.suptitle("Qwen3-VL Inference Profile", fontsize=16, fontweight="bold")
     gs = fig.add_gridspec(2, 3)
 
-    # Panel 1 – phase breakdown
     ax1 = fig.add_subplot(gs[0, 0])
     phases = ["Preprocess", "Generation", "Decoding"]
     times = [result.preprocessing_ms, result.generation_ms, result.decoding_ms]
@@ -607,49 +578,28 @@ def plot_profile(result: ProfileResult, output_dir: Path) -> Path:
     ax1.set_xlabel("Time (ms)")
     ax1.set_title("Inference Phase Breakdown")
     for bar, t in zip(bars, times):
-        ax1.text(
-            bar.get_width() + max(times) * 0.01,
-            bar.get_y() + bar.get_height() / 2,
-            f"{t:.1f} ms",
-            va="center",
-            fontsize=9,
-        )
+        ax1.text(bar.get_width() + max(times) * 0.01, bar.get_y() + bar.get_height() / 2,
+                 f"{t:.1f} ms", va="center", fontsize=9)
 
-    # Panel 2 – vision vs text pie chart
     ax2 = fig.add_subplot(gs[0, 1])
-    vision_ms = sum(
-        v["total_ms"]
-        for k, v in result.component_timings.items()
-        if "Qwen3VLVisionModel" in k and k.count("(") == 1
-    )
-    text_ms = sum(
-        v["total_ms"]
-        for k, v in result.component_timings.items()
-        if "Qwen3VLTextModel" in k and k.count("(") == 1
-    )
+    vision_ms = sum(v["total_ms"] for k, v in result.component_timings.items()
+                    if "Qwen3VLVisionModel" in k and k.count("(") == 1)
+    text_ms = sum(v["total_ms"] for k, v in result.component_timings.items()
+                  if "Qwen3VLTextModel" in k and k.count("(") == 1)
     other_ms = max(result.generation_ms - vision_ms - text_ms, 0)
-    pie_vals = [vision_ms, text_ms, other_ms]
-    pie_labels = [
-        f"Vision Encoder\n{vision_ms:.1f} ms",
-        f"Text Decoder\n{text_ms:.1f} ms",
-        f"Other\n{other_ms:.1f} ms",
-    ]
-    pie_colors = ["#C44E52", "#8172B3", "#CCB974"]
-    ax2.pie(pie_vals, labels=pie_labels, colors=pie_colors, autopct="%1.1f%%", startangle=140, textprops={"fontsize": 9})
+    ax2.pie(
+        [vision_ms, text_ms, other_ms],
+        labels=[f"Vision Encoder\n{vision_ms:.1f} ms", f"Text Decoder\n{text_ms:.1f} ms", f"Other\n{other_ms:.1f} ms"],
+        colors=["#C44E52", "#8172B3", "#CCB974"],
+        autopct="%1.1f%%", startangle=140, textprops={"fontsize": 9},
+    )
     ax2.set_title("Generation Time Split")
 
-    # Panel 3 – vision encoder sub-components
     ax3 = fig.add_subplot(gs[0, 2])
-    vision_components = _extract_components(
-        result.component_timings,
-        class_filter=[
-            "Qwen3VLVisionPatchEmbed",
-            "Qwen3VLVisionAttention",
-            "Qwen3VLVisionMLP",
-            "Qwen3VLVisionPatchMerger",
-            "Qwen3VLVisionRotaryEmbedding",
-        ],
-    )
+    vision_components = _extract_components(result.component_timings, [
+        "Qwen3VLVisionPatchEmbed", "Qwen3VLVisionAttention", "Qwen3VLVisionMLP",
+        "Qwen3VLVisionPatchMerger", "Qwen3VLVisionRotaryEmbedding",
+    ])
     if vision_components:
         names, vals = zip(*sorted(vision_components.items(), key=lambda x: -x[1]))
         y_pos = np.arange(len(names))
@@ -657,13 +607,11 @@ def plot_profile(result: ProfileResult, output_dir: Path) -> Path:
         ax3.set_yticks(y_pos)
         ax3.set_yticklabels(names, fontsize=8)
         ax3.set_xlabel("Time (ms)")
-        ax3.set_title("Vision Encoder Components")
         ax3.invert_yaxis()
     else:
         ax3.text(0.5, 0.5, "No vision data\n(text-only input?)", ha="center", va="center", transform=ax3.transAxes)
-        ax3.set_title("Vision Encoder Components")
+    ax3.set_title("Vision Encoder Components")
 
-    # Panel 4 – per-layer attention vs MLP
     ax4 = fig.add_subplot(gs[1, 0:2])
     attn_times, mlp_times, layer_labels = _extract_layer_breakdown(result.component_timings)
     if attn_times:
@@ -673,40 +621,28 @@ def plot_profile(result: ProfileResult, output_dir: Path) -> Path:
         ax4.bar(x + width / 2, mlp_times, width, label="MLP", color="#DD8452", alpha=0.85)
         ax4.set_xlabel("Decoder Layer")
         ax4.set_ylabel("Time (ms)")
-        ax4.set_title("Per-Layer Attention vs MLP Time")
         ax4.set_xticks(x)
         ax4.set_xticklabels(layer_labels, fontsize=7, rotation=45, ha="right")
         ax4.legend()
     else:
         ax4.text(0.5, 0.5, "No per-layer data available", ha="center", va="center", transform=ax4.transAxes)
-        ax4.set_title("Per-Layer Attention vs MLP Time")
+    ax4.set_title("Per-Layer Attention vs MLP Time")
 
-    # Panel 5 – summary text
     ax5 = fig.add_subplot(gs[1, 2])
     ax5.axis("off")
     summary_text = (
         f"Total inference:  {result.total_ms:.1f} ms\n"
         f"  Preprocessing:  {result.preprocessing_ms:.1f} ms\n"
         f"  Generation:     {result.generation_ms:.1f} ms\n"
-        f"  Decoding:       {result.decoding_ms:.1f} ms\n"
-        f"\n"
+        f"  Decoding:       {result.decoding_ms:.1f} ms\n\n"
         f"Input tokens:     {result.input_tokens}\n"
         f"Output tokens:    {result.output_tokens}\n"
         f"Tokens/sec:       {result.tokens_per_second:.1f}\n"
     )
     if result.trace_path:
-        summary_text += f"\nChrome trace:\n  {result.trace_path}\n"
-        summary_text += "  (open in chrome://tracing)"
-    ax5.text(
-        0.05,
-        0.95,
-        summary_text,
-        transform=ax5.transAxes,
-        fontsize=10,
-        verticalalignment="top",
-        fontfamily="monospace",
-        bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0", alpha=0.8),
-    )
+        summary_text += f"\nChrome trace:\n  {result.trace_path}\n  (open in chrome://tracing)"
+    ax5.text(0.05, 0.95, summary_text, transform=ax5.transAxes, fontsize=10, verticalalignment="top",
+             fontfamily="monospace", bbox=dict(boxstyle="round,pad=0.5", facecolor="#f0f0f0", alpha=0.8))
     ax5.set_title("Summary")
 
     chart_path = output_dir / "profile_chart.png"
@@ -721,7 +657,6 @@ def plot_profile(result: ProfileResult, output_dir: Path) -> Path:
 
 
 def create_default_test_case() -> Dict[str, Any]:
-    """Create a default test case for quick testing."""
     return {
         "sample_id": "demo_sample",
         "messages": [
@@ -744,46 +679,40 @@ def save_evaluation_results(
     summary: EvaluationSummary,
     output_dir: Path,
     prefix: str = "evaluation",
-):
-    """Save evaluation metrics and summary to JSON files."""
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     metrics_file = output_dir / f"{prefix}_metrics.json"
     with open(metrics_file, "w", encoding="utf-8") as f:
         json.dump([asdict(m) for m in metrics_list], f, indent=2, ensure_ascii=False)
-    print(f"\nDetailed metrics saved to: {metrics_file}")
 
     summary_file = output_dir / f"{prefix}_summary.json"
     with open(summary_file, "w", encoding="utf-8") as f:
         json.dump(asdict(summary), f, indent=2)
-    print(f"Summary saved to: {summary_file}")
 
+    print(f"\nMetrics  → {metrics_file}")
+    print(f"Summary  → {summary_file}")
     print("\n" + "=" * 60)
     print("EVALUATION SUMMARY")
     print("=" * 60)
-    print(f"Total Samples: {summary.total_samples}")
-    print(f"Successful: {summary.successful_samples}")
-    print(f"Failed: {summary.failed_samples}")
-    print("\nTiming Metrics:")
-    print(f"  Average Preprocessing Time: {summary.avg_preprocessing_time * 1000:.2f} ms")
-    print(f"  Average Generation Time: {summary.avg_generation_time * 1000:.2f} ms")
-    print(f"  Average Decoding Time: {summary.avg_decoding_time * 1000:.2f} ms")
-    print(f"  Average Total Time: {summary.avg_total_time * 1000:.2f} ms")
-    print("\nPerformance Metrics:")
-    print(f"  Average Tokens/Second: {summary.avg_tokens_per_second:.2f}")
-    print(f"  Total Tokens Generated: {summary.total_tokens_generated}")
-    print(f"  Median Generation Time: {summary.median_generation_time * 1000:.2f} ms")
-    print(f"  P95 Generation Time: {summary.p95_generation_time * 1000:.2f} ms")
-    print(f"  P99 Generation Time: {summary.p99_generation_time * 1000:.2f} ms")
-    print(f"  Total Evaluation Time: {summary.total_time:.2f} seconds")
+    print(f"Total Samples:   {summary.total_samples}")
+    print(f"Successful:      {summary.successful_samples}")
+    print(f"Failed:          {summary.failed_samples}")
+    print(f"\nAvg Preprocessing:  {summary.avg_preprocessing_time * 1000:.2f} ms")
+    print(f"Avg Generation:     {summary.avg_generation_time * 1000:.2f} ms")
+    print(f"Avg Decoding:       {summary.avg_decoding_time * 1000:.2f} ms")
+    print(f"Avg Total:          {summary.avg_total_time * 1000:.2f} ms")
+    print(f"Avg Tokens/sec:     {summary.avg_tokens_per_second:.2f}")
+    print(f"Total Tokens:       {summary.total_tokens_generated}")
+    print(f"Median Gen Time:    {summary.median_generation_time * 1000:.2f} ms")
+    print(f"P95 Gen Time:       {summary.p95_generation_time * 1000:.2f} ms")
+    print(f"P99 Gen Time:       {summary.p99_generation_time * 1000:.2f} ms")
     print("=" * 60)
 
 
-def save_profile_results(result: ProfileResult, output_dir: Path):
-    """Save profiling JSON, chart, and print console summary."""
+def save_profile_results(result: ProfileResult, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Console summary
     print("\n" + "=" * 80)
     print("COMPONENT TIMINGS (hook-based)")
     print("=" * 80)
@@ -798,7 +727,6 @@ def save_profile_results(result: ProfileResult, output_dir: Path):
         print("=" * 80)
         print(result.torch_profiler_key_averages)
 
-    # JSON
     json_path = output_dir / "profile_data.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(
@@ -813,19 +741,15 @@ def save_profile_results(result: ProfileResult, output_dir: Path):
                 "component_timings": result.component_timings,
                 "trace_path": result.trace_path,
             },
-            f,
-            indent=2,
+            f, indent=2,
         )
-    print(f"\nProfile data saved to {json_path}")
+    print(f"\nProfile data → {json_path}")
 
-    # Chart
     chart_path = plot_profile(result, output_dir)
-    print(f"Profile chart saved to {chart_path}")
+    print(f"Profile chart → {chart_path}")
 
     if result.trace_path:
-        print(f"\nTo view the Chrome trace:")
-        print(f"  1. Open Chrome and navigate to  chrome://tracing")
-        print(f"  2. Click 'Load' and select  {result.trace_path}")
+        print(f"\nTo view Chrome trace: open chrome://tracing and load {result.trace_path}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -833,92 +757,30 @@ def save_profile_results(result: ProfileResult, output_dir: Path):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Qwen3-VL Evaluation & Profiling Script",
-    )
-    parser.add_argument(
-        "--model-id",
-        type=str,
-        default="Qwen/Qwen3-VL-2B-Instruct",
-        help="HuggingFace model identifier or local path",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        choices=["cuda", "cpu", "auto"],
-        default="auto",
-        help="Device to use (auto = detect automatically)",
-    )
-    parser.add_argument(
-        "--dtype",
-        type=str,
-        choices=["float16", "float32", "auto"],
-        default="auto",
-        help="Data type (auto = select based on device)",
-    )
-    parser.add_argument(
-        "--device-map",
-        type=str,
-        default=None,
-        help="Device mapping strategy (e.g., 'auto', 'balanced'). None = manual placement",
-    )
-    parser.add_argument(
-        "--max-new-tokens",
-        type=int,
-        default=128,
-        help="Maximum number of tokens to generate",
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.1,
-        help="Sampling temperature",
-    )
-    parser.add_argument(
-        "--test-cases-file",
-        type=str,
-        default=None,
-        help="JSON file with test cases (list of dicts with 'sample_id' and 'messages')",
-    )
-    parser.add_argument(
-        "--num-samples",
-        type=int,
-        default=1,
-        help="Number of times to run the default test case (if no test cases file provided)",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="results",
-        help="Directory to save all results",
-    )
-    parser.add_argument(
-        "--output-prefix",
-        type=str,
-        default="evaluation",
-        help="Prefix for evaluation output files",
-    )
-    parser.add_argument(
-        "--no-torch-profiler",
-        action="store_true",
-        help="Skip the torch.profiler pass (only hook-based profiling)",
-    )
-    parser.add_argument(
-        "--tensorboard",
-        action="store_true",
-        help="Also export torch.profiler data for TensorBoard",
-    )
-    parser.add_argument(
-        "--warmup-runs",
-        type=int,
-        default=1,
-        help="Number of warmup inference runs before the profiled run",
-    )
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Qwen3-VL Evaluation & Profiling")
+    parser.add_argument("--model-id", type=str, default="Qwen/Qwen3-VL-2B-Instruct",
+                        help="HuggingFace model ID or local path")
+    parser.add_argument("--device", type=str, choices=["cuda", "cpu", "auto"], default="auto")
+    parser.add_argument("--dtype", type=str, choices=["float16", "float32", "auto"], default="auto")
+    parser.add_argument("--device-map", type=str, default=None,
+                        help="Device map strategy, e.g. 'auto' or 'balanced'")
+    parser.add_argument("--max-new-tokens", type=int, default=128)
+    parser.add_argument("--temperature", type=float, default=0.1)
+    parser.add_argument("--test-cases-file", type=str, default=None,
+                        help="JSON file with test cases (list of {sample_id, messages})")
+    parser.add_argument("--num-samples", type=int, default=1,
+                        help="Number of times to run the default test case")
+    parser.add_argument("--output-dir", type=str, default="results")
+    parser.add_argument("--output-prefix", type=str, default="evaluation")
+    parser.add_argument("--no-torch-profiler", action="store_true",
+                        help="Skip torch.profiler pass (hook-based profiling only)")
+    parser.add_argument("--tensorboard", action="store_true",
+                        help="Export torch.profiler data for TensorBoard")
+    parser.add_argument("--warmup-runs", type=int, default=1)
 
     args = parser.parse_args()
 
-    # ── initialise ───────────────────────────────────────────────────────────
     device = None if args.device == "auto" else args.device
     dtype = None if args.dtype == "auto" else args.dtype
 
@@ -929,55 +791,42 @@ def main():
         device_map=args.device_map,
     )
 
-    # ── load test cases ──────────────────────────────────────────────────────
     if args.test_cases_file:
-        print(f"\n=== Loading Test Cases from {args.test_cases_file} ===")
+        print(f"\n=== Loading test cases from {args.test_cases_file} ===")
         with open(args.test_cases_file, "r", encoding="utf-8") as f:
             test_cases = json.load(f)
         print(f"Loaded {len(test_cases)} test cases")
     else:
-        print(f"\n=== Using Default Test Case (running {args.num_samples} times) ===")
+        print(f"\n=== Using default test case ({args.num_samples}×) ===")
         test_cases = [create_default_test_case() for _ in range(args.num_samples)]
 
-    # ── create timestamped output directory ──────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(args.output_dir) / timestamp
 
-    # ── run evaluation ───────────────────────────────────────────────────────
     print("\n=== Running Evaluation ===")
     metrics_list = evaluator.evaluate_batch(
         test_cases=test_cases,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
-        show_progress=True,
     )
     summary = evaluator.compute_summary(metrics_list)
     save_evaluation_results(metrics_list, summary, output_dir, args.output_prefix)
 
-    # ── run detailed profiling ───────────────────────────────────────────────
     print("\n" + "=" * 60)
-    print("RUNNING DETAILED PROFILING")
+    print("RUNNING PROFILING")
     print("=" * 60)
-
-    profiling_messages = create_default_test_case()["messages"]
-    tb_dir = str(output_dir / "tensorboard") if args.tensorboard else None
-
     profile_result = run_profile(
         model=evaluator.model,
         processor=evaluator.processor,
-        messages=profiling_messages,
+        messages=create_default_test_case()["messages"],
         device=evaluator.device,
         max_new_tokens=args.max_new_tokens,
         use_torch_profiler=not args.no_torch_profiler,
-        tensorboard_dir=tb_dir,
+        tensorboard_dir=str(output_dir / "tensorboard") if args.tensorboard else None,
         warmup_runs=args.warmup_runs,
         output_dir=output_dir,
     )
     save_profile_results(profile_result, output_dir)
-
-    if tb_dir:
-        print(f"\nTo view in TensorBoard:")
-        print(f"  tensorboard --logdir {tb_dir}")
 
     print(f"\nAll results saved to: {output_dir}")
 
