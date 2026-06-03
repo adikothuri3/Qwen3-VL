@@ -60,14 +60,14 @@ def _plot_curves(report: Dict[str, Any], out: Path) -> None:
     fig, axes = plt.subplots(nrow, ncol, figsize=(7 * ncol, 4.5 * nrow), squeeze=False)
     acc = report["accuracy"]
 
+    # x-axis values in monotonic (descending) order so the connecting line does not
+    # zig-zag: full (1.0) then the pruning ratios from largest to smallest.
+    x_full = [1.0] + sorted(ratios, reverse=True)
     for ti, task in enumerate(tasks):
         ax = axes[ti // ncol][ti % ncol]
         base = _baseline_acc(report, task)
-        x_full = [1.0] + ratios  # plot baseline at 1.0 then the pruning levels
         for mi, method in enumerate(methods):
-            ys = [base]
-            for r in ratios:
-                ys.append(acc[task].get(_cond_key(method, r)))
+            ys = [base] + [acc[task].get(_cond_key(method, r)) for r in sorted(ratios, reverse=True)]
             xs = [x for x, y in zip(x_full, ys) if y is not None]
             yy = [y for y in ys if y is not None]
             ax.plot(xs, yy, marker=_MARKERS[mi % len(_MARKERS)], label=method, linewidth=1.8)
@@ -76,7 +76,7 @@ def _plot_curves(report: Dict[str, Any], out: Path) -> None:
         ax.set_title(f"{task}  (full = {base:.3f})" if base is not None else task)
         ax.set_xlabel("keep-ratio (fraction of visual tokens retained, per group)")
         ax.set_ylabel("accuracy")
-        ax.set_xticks([1.0] + ratios)
+        ax.set_xticks(x_full)
         ax.invert_xaxis()  # most-pruned on the right -> reads as "degradation"
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
@@ -184,9 +184,15 @@ def _build_explainer(report: Dict[str, Any], mid: Optional[float]) -> str:
         "## What this experiment answers",
         "Given a fixed retained-token budget, *which tokens should we keep?* Every scorer keeps the "
         "exact same number of tokens per group, so any accuracy difference is purely about token "
-        "*selection*. `random` is the control — a useful scorer must beat it; `activation_magnitude`, "
-        "`diversity`, and `hybrid` are the vision-side signals motivated by Phase 2 (decoder attention "
-        "was an informative null there).",
+        "*selection*. `random` is the control — a useful scorer must beat it. `activation_magnitude`, "
+        "`diversity`, and `hybrid` are vision-side feature signals; `vision_attention` is the "
+        "literature's strong vision-encoder attention-received signal (VisPruner / FasterVLM, CLS-free "
+        "recipe). Decoder attention is deliberately excluded — Phase 2 showed it is a null.",
+        "",
+        "**Rank by accuracy, not KL.** The first-token KL reported alongside is a secondary signal and "
+        "is *structurally biased* toward `activation_magnitude` (KL rewards a small output shift, and "
+        "magnitude keeps the largest additive vectors, minimizing that shift almost by construction). "
+        "At this sample size the verdict is read off accuracy; KL is a cross-check only.",
         "",
         "## Figures",
         "- `scoring_accuracy_curves.png` — per task, accuracy as the keep-ratio drops from 1.0. A "

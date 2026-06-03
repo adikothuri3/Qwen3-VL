@@ -27,6 +27,9 @@ Scorers (paper.md section 6, Level 2):
                          keeps a feature-space-spread subset, avoids near-duplicates
     hybrid               magnitude-seeded, magnitude+diversity-weighted greedy
                          selection (paper.md: saliency + magnitude + diversity_bonus)
+    vision_attention     keep tokens with the highest vision-encoder attention-received
+                         (the CLS-free VisPruner/FasterVLM signal; the score vector is
+                         captured separately by VisionAttentionCapturer and passed in)
 
 All scorers return exactly ``k = round(keep_ratio * N)`` kept indices so methods
 are compared at an identical retained-token count (the fairness requirement of
@@ -51,7 +54,12 @@ SCORING_METHODS = (
     "activation_magnitude",
     "diversity",
     "hybrid",
+    "vision_attention",
 )
+
+# Methods whose token scores are supplied externally (not derived from the embeds
+# tensor) — they require a per-group ``scores`` vector at selection time.
+SCORE_BASED_METHODS = ("vision_attention",)
 
 _PROJ_DIM = 32  # random-projection dim for diversity / hybrid greedy selection
 _HYBRID_ALPHA = 0.5  # magnitude weight in the hybrid objective
@@ -184,14 +192,24 @@ def _greedy_indices(embeds: torch.Tensor, k: int, alpha: float, beta: float) -> 
     return selected
 
 
+def _score_indices(scores: torch.Tensor, k: int) -> torch.Tensor:
+    """Keep the k highest-scoring tokens (for externally supplied per-token scores)."""
+    return torch.topk(scores, k, largest=True, sorted=False).indices
+
+
 def select_keep_indices(
     embeds: torch.Tensor,
     keep_ratio: float,
     method: str,
     grid_dims: Optional[Sequence[Sequence[int]]] = None,
     generator: Optional[torch.Generator] = None,
+    scores: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Return the indices (into rows of ``embeds``) to KEEP for one group."""
+    """Return the indices (into rows of ``embeds``) to KEEP for one group.
+
+    ``scores`` is a per-token importance vector (length N), required for the
+    score-based methods (``vision_attention``) and ignored by the others.
+    """
     n = embeds.shape[0]
     k = _keep_count(n, keep_ratio)
     if k >= n:
@@ -209,6 +227,12 @@ def select_keep_indices(
         return _greedy_indices(embeds, k, alpha=0.0, beta=1.0)
     if method == "hybrid":
         return _greedy_indices(embeds, k, alpha=_HYBRID_ALPHA, beta=_HYBRID_BETA)
+    if method == "vision_attention":
+        if scores is None:
+            raise ValueError("vision_attention requires a per-token `scores` vector")
+        if scores.shape[0] != n:
+            raise ValueError(f"scores length {scores.shape[0]} != num tokens {n}")
+        return _score_indices(scores.to(embeds.device), k)
     raise ValueError(f"unknown scoring method {method!r}; choose from {SCORING_METHODS}")
 
 
@@ -218,6 +242,7 @@ def prune_group(
     method: str,
     grid_dims: Optional[Sequence[Sequence[int]]] = None,
     generator: Optional[torch.Generator] = None,
+    scores: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Reconstruct-to-full-length prune of one group's embeds.
 
@@ -227,7 +252,7 @@ def prune_group(
     """
     if keep_ratio >= 1.0:
         return embeds
-    keep = select_keep_indices(embeds, keep_ratio, method, grid_dims, generator)
+    keep = select_keep_indices(embeds, keep_ratio, method, grid_dims, generator, scores)
     out = torch.zeros_like(embeds)
     if keep.numel():
         out[keep] = embeds[keep]
@@ -279,10 +304,18 @@ class DeepStackPruner:
         self._specs: Dict[int, PruneSpec] = dict(group_specs or {})
         self._seed = seed
         self._grid: Optional[List[List[int]]] = None
+        # per-group externally-supplied token scores (for score-based methods, e.g.
+        # vision_attention); set per sample via set_vision_scores, cleared otherwise.
+        self._scores: Dict[int, torch.Tensor] = {}
         self._handles: List[Any] = []
 
     def set_specs(self, group_specs: Dict[int, PruneSpec]) -> None:
         self._specs = dict(group_specs)
+
+    def set_vision_scores(self, scores: Optional[Dict[int, torch.Tensor]]) -> None:
+        """Set (or clear with None) the per-group token scores used by score-based
+        methods (vision_attention). Keyed by group index, each a length-N vector."""
+        self._scores = dict(scores) if scores else {}
 
     def set_uniform(self, method: str, keep_ratio: float) -> None:
         """Convenience: same (method, keep_ratio) for every group."""
@@ -314,12 +347,19 @@ class DeepStackPruner:
         for gi, spec in self._specs.items():
             if not (0 <= gi < len(embeds)) or spec.keep_ratio >= 1.0:
                 continue
+            scores = self._scores.get(gi) if spec.method in SCORE_BASED_METHODS else None
+            if spec.method in SCORE_BASED_METHODS and scores is None:
+                raise ValueError(
+                    f"method {spec.method!r} for group {gi} needs scores; "
+                    "call set_vision_scores(...) before this forward"
+                )
             embeds[gi] = prune_group(
                 embeds[gi],
                 spec.keep_ratio,
                 spec.method,
                 grid_dims=self._grid,
                 generator=self._generator(embeds[gi].device),
+                scores=scores,
             )
 
     def _register(self) -> None:

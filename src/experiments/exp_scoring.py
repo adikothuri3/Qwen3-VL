@@ -1,27 +1,38 @@
 """
-Within-group scoring comparison (Phase 4 / Experiment 4).
+Within-group scoring comparison (Phase 4 / Experiment 4; Phase 4b re-run).
 
-Compares the five within-group token-scoring strategies of paper.md section 6
-(Level 2) at several keep-ratios, using a *uniform* budget across all DeepStack
-groups (the same keep-ratio for every group). Holding the budget uniform isolates
-the question "which scorer keeps the right tokens?" from the separate question
-"how should the budget be split across groups?" (that split is Phase 5).
+Compares within-group token-scoring strategies (paper.md section 6, Level 2) at
+several keep-ratios, using a *uniform* budget across all DeepStack groups (the same
+keep-ratio for every group). Holding the budget uniform isolates the question
+"which scorer keeps the right tokens?" from the separate question "how should the
+budget be split across groups?" (that split is Phase 5).
+
+Phase 4b defaults: methods = random (control), activation_magnitude, hybrid, and
+**vision_attention** — the literature's strong vision-encoder signal (VisPruner /
+FasterVLM; CLS-free "attention-received" recipe, captured by VisionAttentionCapturer
+in src/deepstack/saliency.py). The proven-loser scorers (spatial_uniform, diversity)
+from run 1 are dropped from the default set but remain available via --methods. Run
+at 300 samples/task so the verdict rests on accuracy, not the magnitude-biased KL.
 
 For each (task, method, keep_ratio) it measures, over a labeled subset:
 
   - labeled accuracy   -> the headline signal (VQA soft-accuracy / ANLS / integer
                           exact-match, per task; same scorers as Phase 3)
-  - first-token KL      -> dense reference-free signal: KL(P_full || P_pruned) of
-                          the first generated-token distribution vs no-pruning
+  - first-token KL      -> secondary signal: KL(P_full || P_pruned) of the first
+                          generated-token distribution vs no-pruning. NOTE: KL is
+                          structurally biased toward activation_magnitude (it rewards
+                          minimal output shift), so rank by accuracy at this scale.
 
 Pruning is done by DeepStackPruner (src/deepstack/prune.py), a forward hook that
 replaces each group's embeds with its reconstruct-to-full-length pruned version —
-no model-source edits. keep_ratio=1.0 is the shared "full" baseline (run once; all
-methods are identical there), so the comparison is reported as accuracy *drop*
-from that baseline at each pruning level.
+no model-source edits. keep_ratio=1.0 is the shared "full" baseline; vision_attention
+saliency is captured once during that baseline forward (eager) and reused across
+keep-ratios (it is image-only). If capture fails/OOMs for a sample, vision_attention
+is marked N/A for that sample and the run continues.
 
 Task loading, image size-capping, answer normalization and the per-task scorers
 are reused from exp_sensitivity to keep the two experiments metric-compatible.
+Results are checkpointed to scoring.json after each task (T4-disconnect resilience).
 
 Output: results/<timestamp>/scoring.json
 
@@ -43,13 +54,18 @@ import torch
 # Reuse Phase 3 task registry + scorers (importing it performs the
 # local_transformers redirect via src.evaluate) and the prune hook.
 from src.deepstack.prune import SCORING_METHODS, DeepStackPruner, PruneSpec
+from src.deepstack.saliency import VisionAttentionCapturer
 from src.evaluate import Qwen3VLEvaluator
 from src.experiments.exp_sensitivity import _ANSWER_SUFFIX, TASKS, load_task_samples
 
-_DEFAULT_NUM_SAMPLES = 100
+_DEFAULT_NUM_SAMPLES = 300
 _DEFAULT_MAX_NEW_TOKENS = 32
-_DEFAULT_KEEP_RATIOS = (1.0, 0.75, 0.50, 0.25)
-_DEFAULT_METHODS = SCORING_METHODS  # all five
+# Phase 4b: 0.75 was all-noise in run 1 -> 0.50/0.25 discriminate best.
+_DEFAULT_KEEP_RATIOS = (1.0, 0.50, 0.25)
+# Phase 4b: drop the proven losers (spatial_uniform, diversity) from run 1; keep
+# random as the control anchor and add the literature signal (vision_attention).
+_DEFAULT_METHODS = ("random", "activation_magnitude", "hybrid", "vision_attention")
+_VISION_ATTENTION = "vision_attention"
 _BASELINE_KEY = "full"  # keep_ratio == 1.0 condition
 
 
@@ -140,6 +156,39 @@ def _build_conditions(
     return conditions
 
 
+def _num_visual_tokens(inputs: Dict[str, Any], merge_size: int) -> Optional[int]:
+    """Per-group merged-token count N = Σ t·(h/ms)·(w/ms) from image_grid_thw."""
+    grid = inputs.get("image_grid_thw")
+    if grid is None:
+        return None
+    return int((grid.prod(dim=-1) // (merge_size * merge_size)).sum().item())
+
+
+def _baseline_with_capture(
+    evaluator: Qwen3VLEvaluator,
+    pruner: DeepStackPruner,
+    inputs: Dict[str, Any],
+    max_new_tokens: int,
+    n_tokens: Optional[int],
+    need_vision: bool,
+) -> Tuple[str, torch.Tensor, Optional[Dict[int, torch.Tensor]]]:
+    """Run the no-pruning baseline; if ``need_vision``, also capture per-group
+    vision attention-received saliency from that forward (eager). Returns
+    (answer, first-token logits, vision_scores-or-None)."""
+    pruner.set_specs({})  # baseline: no pruning
+    if need_vision and n_tokens is not None:
+        try:
+            with VisionAttentionCapturer(evaluator.model) as cap:
+                ans, logits = _generate(evaluator, inputs, max_new_tokens)
+            return ans, logits, cap.collect(n_tokens)
+        except Exception as e:  # noqa: BLE001 — capture is best-effort; fall back to plain baseline
+            print(f"  [vision capture failed: {type(e).__name__}: {e}]", flush=True)
+            if evaluator.device == "cuda":
+                torch.cuda.empty_cache()
+    ans, logits = _generate(evaluator, inputs, max_new_tokens)
+    return ans, logits, None
+
+
 def run_scoring(
     model_id: str,
     device: Optional[str] = None,
@@ -158,15 +207,33 @@ def run_scoring(
     vision_cfg = model.config.vision_config
     vision_layers: List[int] = list(vision_cfg.deepstack_visual_indexes)
     num_groups = len(vision_layers)
+    merge_size = int(vision_cfg.spatial_merge_size)
 
     task_names = tasks or list(TASKS.keys())
     method_list = methods or list(_DEFAULT_METHODS)
     ratio_list = keep_ratios or list(_DEFAULT_KEEP_RATIOS)
     conditions = _build_conditions(method_list, ratio_list)
+    prune_conditions = [(ck, m, r) for ck, m, r in conditions if r < 1.0]
+    need_vision = _VISION_ATTENTION in method_list
 
     acc_acc: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
     kl_acc: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
     samples_per_task: Dict[str, int] = {}
+
+    # Output dir up front so each task can checkpoint into the same scoring.json.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out = Path(output_dir) / ts
+    out.mkdir(parents=True, exist_ok=True)
+    report_path = out / "scoring.json"
+
+    def _checkpoint() -> ScoringReport:
+        rep = _finalize(
+            evaluator, vision_layers, method_list, ratio_list, task_names,
+            num_samples, max_new_tokens, samples_per_task, acc_acc, kl_acc,
+        )
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(asdict(rep), f, indent=2)
+        return rep
 
     with DeepStackPruner(model) as pruner:
         for task_name in task_names:
@@ -203,31 +270,38 @@ def run_scoring(
                     print(f"  [{task_name} #{si}] preprocess failed ({type(e).__name__}: {e})", flush=True)
                     continue
 
+                n_tokens = _num_visual_tokens(inputs, merge_size)
                 try:
                     logits_by_cond: Dict[str, torch.Tensor] = {}
                     answer_by_cond: Dict[str, str] = {}
-                    for cond_key, method, ratio in conditions:
-                        if ratio >= 1.0:
-                            pruner.set_specs({})  # baseline: no pruning
-                        else:
-                            pruner.set_specs(
-                                {gi: PruneSpec(method, ratio) for gi in range(num_groups)}
-                            )
-                        ans, logits = _generate(evaluator, inputs, max_new_tokens)
-                        answer_by_cond[cond_key] = ans
-                        logits_by_cond[cond_key] = logits
+                    # Baseline first (captures vision saliency here, reused below).
+                    ans, logits, vision_scores = _baseline_with_capture(
+                        evaluator, pruner, inputs, max_new_tokens, n_tokens, need_vision
+                    )
+                    answer_by_cond[_BASELINE_KEY] = ans
+                    logits_by_cond[_BASELINE_KEY] = logits
+                    pruner.set_vision_scores(vision_scores)
+
+                    for cond_key, method, ratio in prune_conditions:
+                        if method == _VISION_ATTENTION and vision_scores is None:
+                            continue  # capture failed/misaligned -> N/A for this sample
+                        pruner.set_specs(
+                            {gi: PruneSpec(method, ratio) for gi in range(num_groups)}
+                        )
+                        a, lg = _generate(evaluator, inputs, max_new_tokens)
+                        answer_by_cond[cond_key] = a
+                        logits_by_cond[cond_key] = lg
                 except Exception as e:  # noqa: BLE001 — skip a failed forward, free memory
                     print(f"  [{task_name} #{si}] generation failed ({type(e).__name__}: {e})", flush=True)
                     if evaluator.device == "cuda":
                         torch.cuda.empty_cache()
                     continue
 
-                for cond_key, _m, _r in conditions:
+                full_logits = logits_by_cond[_BASELINE_KEY]
+                for cond_key in answer_by_cond:
                     acc_acc[task_name][cond_key].append(
                         spec.scorer(answer_by_cond[cond_key], sample["answers"])
                     )
-                full_logits = logits_by_cond[_BASELINE_KEY]
-                for cond_key, _m, _r in conditions:
                     kl_acc[task_name][cond_key].append(
                         _kl_first_token(full_logits, logits_by_cond[cond_key])
                     )
@@ -236,19 +310,9 @@ def run_scoring(
             samples_per_task[task_name] = scored
             if scored:
                 _print_task_line(task_name, acc_acc[task_name])
+            _checkpoint()  # persist after each task so a disconnect keeps finished tasks
 
-    report = _finalize(
-        evaluator, vision_layers, method_list, ratio_list, task_names,
-        num_samples, max_new_tokens, samples_per_task, acc_acc, kl_acc,
-    )
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = Path(output_dir) / ts
-    out.mkdir(parents=True, exist_ok=True)
-    report_path = out / "scoring.json"
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(asdict(report), f, indent=2)
-
+    report = _checkpoint()
     _print_summary(report, report_path)
     return report
 
@@ -328,11 +392,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--methods", type=str, default=None,
-        help=f"Comma-separated subset of {list(_DEFAULT_METHODS)}; default = all.",
+        help=f"Comma-separated subset of {list(SCORING_METHODS)}; default = {list(_DEFAULT_METHODS)}.",
     )
     parser.add_argument(
         "--keep-ratios", type=str, default=None,
-        help="Comma-separated keep ratios in (0,1]; default = 1.0,0.75,0.50,0.25.",
+        help="Comma-separated keep ratios in (0,1]; default = 1.0,0.50,0.25.",
     )
     args = parser.parse_args()
 

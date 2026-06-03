@@ -665,6 +665,16 @@ toggle.
 
 #### Phase 4 Findings (100 samples/task, Qwen3-VL-2B-Instruct, T4, fp16 — `results/20260603_204751`)
 
+> **⚠️ Correction (superseded in part by Phase 4b).** The original verdict below over-claimed
+> "activation_magnitude wins." It does not cleanly: at the discriminating ratio (0.25) magnitude and
+> hybrid are a **dead heat**, and the KL signal that favored magnitude is **structurally biased**
+> toward it (see the caveat below). Two things are solid and stand: (a) the **controls lose** —
+> random, spatial_uniform, and diversity are all clearly worse; (b) the **large compressibility
+> headroom** (50–75% droppable within noise). What is *not* settled is the leader, and the literature's
+> strong **vision-encoder attention** signal was never tested here. Phase 4b adds `vision_attention`
+> and re-runs at 300 samples to settle it on accuracy. Read this section as the run-1 record, then
+> Phase 4b for the resolved verdict.
+
 **Read the KL, not the raw accuracy.** At n=100 the labeled-accuracy metric is dominated by noise:
 ~40% of the (task × scorer × ratio) cells show a *negative* drop (pruning "improving" accuracy),
 which is impossible in expectation — the same ±1–2% variance Phase 3 flagged. The auto-generated
@@ -735,13 +745,49 @@ counting/general VQA are robust (flattest curves, smallest KL).
    efficiency requires an actual sequence-shortening mechanism, and §10 Experiment 5's warning
    applies (token cuts don't automatically become wall-clock gains — measure them).
 
-**Decision for Phase 5.** Fix the within-group scorer to **`activation_magnitude`** (parameter-free,
-deterministic, fastest, wins the most cells, best on detail tasks). Report **`hybrid`** as an
-ablation (marginal, task-dependent gain on text tasks; its diversity component adds little). **Drop
-`diversity` and `spatial_uniform`** — document them as the controls that lost. The 50–75% headroom
-means Phase 5's differential budgets have room to work: combine with Phase 3's group sensitivity
-(G0 expendable, G2 critical for OCR) to test schedules that prune G0 hard and protect G2, using
-magnitude selection within each group.
+**Decision (original, now deferred to Phase 4b).** Run 1 suggested fixing the scorer to
+`activation_magnitude` with `hybrid` as an ablation and dropping `diversity`/`spatial_uniform`. This is
+deferred: magnitude vs hybrid is unsettled at n=100 and the KL ranking is biased, and the literature's
+vision-encoder attention signal was untested. Phase 4b resolves the scorer choice on accuracy at 300
+samples before Phase 5 commits to one.
+
+#### Phase 4b: Vision-encoder attention scorer + accuracy-led re-run — ✅ IMPLEMENTED (run pending)
+
+**Why.** The run-1 leader was unsettled and the strongest training-free signal in the literature was
+missing. Per **VisPruner (ICCV 2025, arXiv:2412.01818)** and **FasterVLM**, the **vision-encoder**
+attention (not LM/decoder attention) is the SOTA importance signal: it "decisively outperforms"
+text-visual/decoder attention and random selection (VisPruner ablation: +5% TextVQA, +1.5% POPE over
+random; FasterVLM prunes 95% of tokens keeping ~90% performance). Decoder attention is correctly
+excluded (Phase 2's null; VisPruner's "attention shift/dispersion").
+
+**CLS-free adaptation (important).** VisPruner's canonical signal is **[CLS]→patch** attention, but
+**Qwen3-VL's ViT has no [CLS] token and no register tokens** (verified: `patch_embed → pos_embed →
+blocks → merger`, pure patch tokens). VisPruner gives the exact recipe for this case ("for models
+without a [CLS] token, e.g. SigLIP, average the rows of A = the average attention each patch token
+receives"). Our `vision_attention` scorer implements exactly that: **per-patch attention-received** at
+the DeepStack source ViT layers (5/11/17). This is literature-sanctioned, not improvised.
+
+**Implementation.** `src/deepstack/saliency.py` (`VisionAttentionCapturer`): forces vision-only eager
+attention and wraps the module-global `eager_attention_forward` to capture the weights the model
+already computes (no second matmul), identifying the 3 source-layer attention modules by object
+identity. The pre-merge→post-merge map is exact (`PatchMerger.view(-1, hidden·merge²)` ⇒ 4 contiguous
+patches per merged token ⇒ `received.reshape(N,4).mean(1)`; guarded by `received.numel()==4N`). Saliency
+is image-only and captured once during the eager `full` baseline forward, then reused across keep-ratios
+(no extra forward, no ordering problem). `prune.py` adds `vision_attention` as a score-based selector
+(top-k by saliency; same exact-k + reconstruct-to-full-length contract). `exp_scoring.py` defaults to
+methods `{random, activation_magnitude, hybrid, vision_attention}` (drops the proven losers from the
+default set; both remain available via `--methods`), keep-ratios `{1.0, 0.50, 0.25}`, 300 samples/task
+(~10,800 generations), with per-task checkpointing of `scoring.json`. On capture failure/OOM,
+`vision_attention` is marked N/A for that sample and the run continues.
+
+**Verdict is read off accuracy** (KL stays magnitude-biased). One plausible outcome to anticipate: in a
+CLS-free encoder, attention-received often correlates with activation magnitude (sink tokens have both
+high norm and high attention), so `vision_attention ≈ activation_magnitude` is a real possibility — and
+would itself explain run 1's magnitude/hybrid ambiguity.
+
+#### Phase 4b Findings
+_Pending the Colab run (RUN_SCORING=True, defaults). To be filled with the accuracy-led 300-sample
+ranking incl. vision_attention, then the final Phase 5 scorer decision._
 
 ### Phase 5: Implement Budgeting
 Fixed budget schedules to test:
@@ -898,7 +944,8 @@ Produce:
 - [x] Phase 1: DeepStack internals mapped in `local_transformers/` (probe: `src/deepstack/probe.py`; see §13 Phase 1)
 - [x] Phase 2: Measurement hooks implemented + run + figures (`src/deepstack/instrument.py`, `visualize.py`; results/20260603_080941). Headline: non-uniform within-group dispersion (CV 0.61/0.45/0.42) = the dispersion lens; attention is an informative null. See §13 Phase 2 Findings
 - [x] Phase 3: Ablation switches + sensitivity experiment run (`results/20260603_184741`). Verdict: WEAK GO — task-dependent sensitivity confirmed. G2 (deep) is critical for OCR/text (TextVQA drop_g2=−4%); G0 (shallow) is expendable and mildly harmful for detail tasks; groups are interchangeable for counting/general VQA. See §13 Phase 3 Findings
-- [x] Phase 4: Pruning implemented + run (`results/20260603_204751`). 5 scorers + reconstruct-to-full-length contract (`src/deepstack/prune.py`, `exp_scoring.py`, `visualize_scoring.py`). Verdict (read via first-token KL; raw accuracy is noise at n=100): **activation_magnitude wins** (best on detail tasks), hybrid ties (best on text tasks), **diversity and spatial_uniform lose** (negative results). DeepStack refinement is highly compressible — 50–75% droppable with accuracy within noise. Phase 5 fixes the scorer to magnitude. See §13 Phase 4 Findings
+- [x] Phase 4: Pruning implemented + run 1 (`results/20260603_204751`). 5 scorers + reconstruct-to-full-length contract. Solid results: **controls (random/spatial/diversity) lose**; **DeepStack refinement is highly compressible** (50–75% droppable within noise). NOT settled: magnitude vs hybrid (dead heat; KL is biased toward magnitude; accuracy is noise at n=100). See §13 Phase 4 Findings + correction banner
+- [~] Phase 4b: Vision-encoder attention scorer (`vision_attention`, the CLS-free VisPruner/FasterVLM signal) added + accuracy-led re-run wired (`src/deepstack/saliency.py`; `prune.py`, `exp_scoring.py`, `visualize_scoring.py`; 300 samples). Code done + locally verified; **Colab run pending** (RUN_SCORING=True). Settles the Phase 5 scorer choice. See §13 Phase 4b
 - [ ] Phase 5: Budgeting implemented
 - [ ] Phase 6: Full benchmark run
 - [ ] Phase 7: Analysis and figures
