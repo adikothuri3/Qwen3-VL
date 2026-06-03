@@ -1,0 +1,74 @@
+{
+  "model_source": "/content/Qwen3-VL/local_transformers/models/qwen3_vl/modeling_qwen3_vl.py",
+  "num_groups": 3,
+  "vision_layers": [
+    5,
+    11,
+    17
+  ],
+  "injection_layers": [
+    0,
+    1,
+    2
+  ],
+  "out_hidden_size": 2048,
+  "spatial_merge_size": 2,
+  "num_visual_positions": 2752,
+  "image_grid_thw": [
+    [
+      1,
+      86,
+      128
+    ]
+  ],
+  "expected_visual_tokens": 2752,
+  "visual_token_count_matches_grid": true,
+  "groups": [
+    {
+      "group_index": 0,
+      "vision_layer": 5,
+      "injection_decoder_layer": 0,
+      "num_tokens": 2752,
+      "hidden_dim": 2048,
+      "dtype": "torch.float16",
+      "device": "cuda:0",
+      "token_norm_mean": 15.145502090454102,
+      "token_norm_std": 9.72642993927002,
+      "token_norm_min": 8.970094680786133,
+      "token_norm_max": 141.67367553710938,
+      "count_match": true
+    },
+    {
+      "group_index": 1,
+      "vision_layer": 11,
+      "injection_decoder_layer": 1,
+      "num_tokens": 2752,
+      "hidden_dim": 2048,
+      "dtype": "torch.float16",
+      "device": "cuda:0",
+      "token_norm_mean": 17.898983001708984,
+      "token_norm_std": 8.770563125610352,
+      "token_norm_min": 6.717540264129639,
+      "token_norm_max": 68.40946960449219,
+      "count_match": true
+    },
+    {
+      "group_index": 2,
+      "vision_layer": 17,
+      "injection_decoder_layer": 2,
+      "num_tokens": 2752,
+      "hidden_dim": 2048,
+      "dtype": "torch.float16",
+      "device": "cuda:0",
+      "token_norm_mean": 23.227230072021484,
+      "token_norm_std": 10.839309692382812,
+      "token_norm_min": 8.5050687789917,
+      "token_norm_max": 62.80011749267578,
+      "count_match": true
+    }
+  ],
+  "mutation_test": {
+    "naive_drop": "raised ValueError as expected (count mismatch: 2752 visual positions vs 2064 embeds)",
+    "reconstruct": "PASS \u2014 zero-filled reconstruction keeps the count valid"
+  }
+}
