@@ -5,6 +5,7 @@ transformers>=4.57.0
 accelerate
 qwen-vl-utils
 huggingface_hub
+datasets
 matplotlib
 numpy
 tqdm

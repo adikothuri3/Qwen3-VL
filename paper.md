@@ -496,14 +496,47 @@ is the dispersion lens of §4.**
 replicated, scale-robust) — enough to justify building the per-group budgeting method. It does **not**
 yet show non-uniformity in *accuracy/compression tolerance*; that is the job of Phase 3.
 
-### Phase 3: Implement Ablation Switches
-Add flags:
-```
---disable_deepstack_group 0
---disable_deepstack_group 1
---disable_deepstack_group 2
---keep_deepstack_group 0
-```
+### Phase 3: Implement Ablation Switches — ✅ BUILT (run pending)
+
+This is the **go/no-go** experiment (Experiment 2): it is the experiment that
+*confirms or rejects* per-group accuracy sensitivity, which Phase 2's feature-structure
+result only *motivates* (see §4 caveat).
+
+**Ablation mechanism — `src/deepstack/ablation.py` (`DeepStackAblator`).** Non-invasive,
+edits no model source. Injection is a pure additive op
+(`hidden_states[visual_pos_masks] += deepstack_visual_embeds[i]`) and the embeds reach the
+text model as a forward kwarg, so a forward-pre-hook that **zeros group `i`'s embeds tensor**
+reproduces "remove group `i`" exactly — the 1:1 count contract and MRoPE positions stay valid,
+only the additive contribution becomes 0. Injection only fires on the prefill forward, so the
+hook naturally affects only prefill. `standard_conditions(num_groups)` builds the **8 conditions**:
+`full`, `drop_g0/1/2`, `keep_g0/1/2`, `drop_all` (`drop_all` == the §9 "No DeepStack" baseline).
+Group count is read from the loaded config's `deepstack_visual_indexes` (never hard-coded).
+
+**Experiment runner — `src/experiments/exp_sensitivity.py`.** For each of 4 task types and each of
+the 8 conditions, over a labeled subset (default 100 samples/task), it measures:
+- **Labeled accuracy** (the headline Figure-3 signal): VQA soft-accuracy (General VQA, TextVQA),
+  ANLS (DocVQA), integer exact-match (Counting). Scorers are pure-Python (canonical VQA
+  normalization; in-file Levenshtein for ANLS).
+- **First-token KL** (dense, reference-free): `KL(P_full ‖ P_cond)` of the first generated-token
+  distribution vs full DeepStack. Both signals come from a single greedy `generate()` per condition
+  (`return_dict_in_generate` yields the answer and the first-token logits together).
+
+Tasks: General VQA (`lmms-lab/VQAv2`), TextVQA (`lmms-lab/textvqa`), DocVQA (`lmms-lab/DocVQA`),
+Counting (VQAv2 "how many" subset as a TallyQA-style proxy). Datasets are streamed (no full
+download) and images size-capped to ≤1024px; a bad sample/dataset is skipped, never fatal (same
+hardening as `instrument.py`). Writes `results/<ts>/sensitivity.json`
+(`accuracy[task][cond]`, `accuracy_drop[task][cond]`, `kl[cond]`). Dataset ids are best-effort and
+may need swapping on the first Colab run if gated/renamed.
+
+**Visualization — `src/deepstack/visualize_sensitivity.py`** (reads JSON only, runs locally):
+`sensitivity_heatmap.png` (Figure 3: rows = tasks, cols = conditions, color = accuracy drop),
+`kl_by_condition.png`, and `EXPLAINER_sensitivity.md` with a data-driven go/no-go verdict.
+
+Wired into `colab_run.ipynb` via the `RUN_SENSITIVITY` toggle (auto-runs the visualizer after).
+
+**Go/no-go signal:** if `drop_g0/g1/g2` produce *different* per-task accuracy drops (especially
+OCR/DocVQA more fragile than General VQA), per-depth budgeting is validated; if all groups behave
+identically, the method needs rethinking (§16). **Results pending the Colab run.**
 
 ### Phase 4: Implement Pruning (start simple)
 Order:
@@ -666,7 +699,7 @@ Produce:
 - [x] CLAUDE.md and paper.md created
 - [x] Phase 1: DeepStack internals mapped in `local_transformers/` (probe: `src/deepstack/probe.py`; see §13 Phase 1)
 - [x] Phase 2: Measurement hooks implemented + run + figures (`src/deepstack/instrument.py`, `visualize.py`; results/20260603_080941). Headline: non-uniform within-group dispersion (CV 0.61/0.45/0.42) = the dispersion lens; attention is an informative null. See §13 Phase 2 Findings
-- [ ] Phase 3: Ablation switches implemented
+- [x] Phase 3: Ablation switches built (`src/deepstack/ablation.py`, `src/experiments/exp_sensitivity.py`, `visualize_sensitivity.py`) — zero-embeds hook, 8 conditions, 4 tasks, accuracy + first-token KL. See §13 Phase 3. **Colab run pending** (this is the go/no-go that confirms/rejects accuracy-sensitivity non-uniformity)
 - [ ] Phase 4: Pruning implemented
 - [ ] Phase 5: Budgeting implemented
 - [ ] Phase 6: Full benchmark run
