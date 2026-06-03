@@ -53,7 +53,7 @@ import torch
 from src.evaluate import Qwen3VLEvaluator
 
 _HIST_BINS = 30
-_DEFAULT_NUM_SAMPLES = 4
+_DEFAULT_NUM_SAMPLES = 8
 _MAX_IMAGE_SIDE = 1024  # cap longest side so a huge image can't OOM the prefill
 
 
@@ -65,8 +65,22 @@ _MAX_IMAGE_SIDE = 1024  # cap longest side so a huge image can't OOM the prefill
 # differing in compression sensitivity. Fetched + size-capped locally; on any
 # failure the sample falls back to a deterministic synthetic image.
 REAL_CALIBRATION: List[Tuple[str, str]] = [
+    # natural scene
     ("https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg", "Describe this image."),
+    # counting / multi-object
     ("http://images.cocodataset.org/val2017/000000039769.jpg", "How many cats are in this image?"),
+    # macro / fine detail
+    ("https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/bee.jpg", "What is in this image?"),
+    # indoor scene / many objects
+    ("http://images.cocodataset.org/val2017/000000000139.jpg", "Describe the scene and list the objects you see."),
+    # action / spatial
+    ("http://images.cocodataset.org/val2017/000000000785.jpg", "What is the person doing?"),
+    # OCR / text in the wild
+    ("https://www.ilankelman.org/stopsigns/australia.jpg", "What does the sign say?"),
+    # document / dense text (OCR-heavy)
+    ("https://templates.invoicehome.com/invoice-template-us-neat-750px.png", "Read the text in this document."),
+    # chart / structured graphic
+    ("https://matplotlib.org/stable/_images/sphx_glr_bar_001.png", "Describe this chart."),
 ]
 
 _SYNTH_PROMPTS = [
