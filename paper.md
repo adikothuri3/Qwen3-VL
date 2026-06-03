@@ -57,9 +57,24 @@ This is distinct from generic ViT-layer pruning: the question is not only "which
 
 > Different DeepStack groups have different compression tolerance depending on depth, task, and visual complexity.
 
+**Operationalizing the hypothesis — the dispersion lens (central framing, added 2026-06-03).**
+We make the hypothesis concrete and measurable through **within-group feature dispersion**: how
+*unequal* a group's visual tokens are relative to that group's own scale. A high-dispersion group
+holds many near-redundant tokens plus a few dominant ones → more of it can be pruned at the same
+accuracy; a low-dispersion (uniform) group has little dead weight → it is more fragile. The paper is
+*built around* this lens: dispersion is the signal that both **motivates** per-group budgeting and
+**parameterizes the budget-allocation rule** (allocate larger pruning budgets to higher-dispersion
+groups). We measure dispersion scale-free with the **coefficient of variation (CV = std/mean)** of
+the per-token L2 norm — deliberately *not* the absolute norm, because absolute activation norm grows
+with transformer depth as a residual-stream artifact and is therefore confounded.
+
+Phase 2 result (see §13 Phase 2 Findings): the dispersion gap is real, monotonic, and replicated —
+G0 (ViT L5) CV ≈ 0.61, G1 (L11) ≈ 0.45, G2 (L17) ≈ 0.42. This **motivates** the method but does not
+**prove** differential accuracy sensitivity.
+
 Supporting evidence: HiPrune finds that middle vision-encoder layers tend to capture object-centric features, while deeper layers encode more global contextual representations. LaCo's success with intermediate vision-layer compression also supports that visual-token behavior differs across layers.
 
-This is the go/no-go experiment: if different groups show the same sensitivity, per-depth budgeting loses its justification.
+This is the go/no-go experiment: if different groups show the same sensitivity, per-depth budgeting loses its justification. **Crucial caveat:** dispersion is a *proxy* — the hypothesis is confirmed or rejected only by the Phase 3 ablation / Experiment 2–3 (prune each group, measure per-task accuracy drop), not by the Phase 2 feature statistics alone.
 
 ---
 
@@ -416,7 +431,7 @@ Observations and what they imply for later phases:
 - The probe already emits per-group norm stats — Phase 2 extends the same hook scaffold with
   attention/saliency capture and latency/memory around extraction+injection rather than starting fresh.
 
-### Phase 2: Add Measurement Hooks — ✅ IMPLEMENTED (Colab run pending)
+### Phase 2: Add Measurement Hooks — ✅ DONE (run + figures)
 Log:
 - Token count per DeepStack group
 - Feature norm distributions
@@ -448,7 +463,38 @@ Group count, vision layers, and `out_hidden_size` are read from the loaded confi
 self-corrects to the actual `[5,11,17]`/`2048` rather than the class defaults. CLI mirrors the probe
 (`--model-id/--device/--dtype/--output-dir/--num-samples/--capture-attention`); writes
 `results/<ts>/deepstack_instrument.json`. Wired into `colab_run.ipynb` via the `RUN_INSTRUMENT`
-toggle. **Findings to be filled after the Colab run.**
+toggle. Figures + a plain-English EXPLAINER are rendered by `src/deepstack/visualize.py` into
+`results/<ts>/figures/`.
+
+#### Phase 2 Findings (8 real images, attention on — `results/20260603_080941`)
+
+**This is the central, paper-defining result: groups are non-uniform in feature dispersion, and that
+is the dispersion lens of §4.**
+
+1. **Same token count, different content.** All 3 groups carry identical token counts per image
+   (DeepStack injects the same placeholder positions at every depth), so the question is token
+   *value*, not token *count*.
+2. **Dispersion gradient (the headline).** Per-token L2-norm **CV (std/mean)** = **0.61 / 0.45 / 0.42**
+   for G0 / G1 / G2; max÷median skew = **8.9× / 4.3× / 2.9×**. Shallow G0 is highly unequal (a crowd of
+   redundant low-norm tokens + a few outliers) → most prunable; deep G2 is uniform/dense → most
+   fragile. Replicated on the earlier 4-image run. Illustrated by the "% of tokens below the overall
+   median strength" figure: **68% / 51% / 22%**.
+3. **Absolute norm grows with depth (14.6 → 17.0 → 23.6) — treated as a confound, not a result.**
+   Residual-stream norms grow with depth regardless of importance; the paper leads with the scale-free
+   **CV**, not absolute norm.
+4. **Attention is an informative NULL.** Mean attention *received* per visual token is ~0.001–0.0016
+   and near-identical across groups — it sits at the ~1/sequence-length uniform floor, averaged over
+   all heads/queries at the earliest (positional) decoder layers, over identical positions. This
+   reproduces **VisPruner**'s finding that LM text-visual attention is a poor pruning indicator →
+   **the within-group scorer (§6 Level 2) should rely on vision-side signals (norm, vision saliency,
+   diversity), not decoder attention.**
+5. **DeepStack overhead is negligible (~5 ms total extract+inject).** So the efficiency win must come
+   from *reducing the token count the decoder processes*, not from the injection op — consistent with
+   §1's profiling that the decoder dominates.
+
+**Status of the hypothesis:** Phase 2 shows non-uniformity in *feature structure* (supported,
+replicated, scale-robust) — enough to justify building the per-group budgeting method. It does **not**
+yet show non-uniformity in *accuracy/compression tolerance*; that is the job of Phase 3.
 
 ### Phase 3: Implement Ablation Switches
 Add flags:
@@ -619,7 +665,7 @@ Produce:
 - [x] Comprehensive research review complete
 - [x] CLAUDE.md and paper.md created
 - [x] Phase 1: DeepStack internals mapped in `local_transformers/` (probe: `src/deepstack/probe.py`; see §13 Phase 1)
-- [~] Phase 2: Measurement hooks implemented (`src/deepstack/instrument.py`; Colab run pending to populate distributions)
+- [x] Phase 2: Measurement hooks implemented + run + figures (`src/deepstack/instrument.py`, `visualize.py`; results/20260603_080941). Headline: non-uniform within-group dispersion (CV 0.61/0.45/0.42) = the dispersion lens; attention is an informative null. See §13 Phase 2 Findings
 - [ ] Phase 3: Ablation switches implemented
 - [ ] Phase 4: Pruning implemented
 - [ ] Phase 5: Budgeting implemented
