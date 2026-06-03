@@ -20,6 +20,10 @@ Running log of all moderate changes made during the research project. Each entry
 
 ## Log
 
+[2026-06-02] | [profiling] | Phase 1 complete — mapped Qwen3-VL DeepStack internals. Added src/deepstack/probe.py: a non-invasive forward-hook probe (DeepStackProbe) that reuses Qwen3VLEvaluator for loading + create_default_test_case for input, captures the 3 deepstack groups (vision layers [8,16,24]), per-group shape/dtype/L2-norm stats, injection depths (decoder layers 0/1/2), the visual_pos_masks count, and cross-checks the visual-token count against image_grid_thw. Includes a mutation test proving the strict 1:1 count-contract: naively dropping tokens from a group breaks the injection add (shape mismatch), while prune-then-reconstruct-to-full-length (scatter kept tokens, zero-fill dropped) keeps it valid — this dictates the Phase 4 pruning design. Writes results/<ts>/deepstack_probe.json. Documented findings in paper.md §13 Phase 1 and checked the Phase 1 box. | yes — internals verified against source; runtime confirmation pending the Colab probe run
+
+[2026-06-02] | [workflow] | Enforced hard rule: the model is NEVER run locally — all model runs (evaluate.py, probe.py, future experiments) go through the Colab GPU via colab_run.ipynb. Documented in CLAUDE.md (Colab GPU Workflow). Wired the probe into colab_run.ipynb: Cell 0 gains RUN_PROBE toggle + PROBE_ARGS; Cell 6 dispatches to `python -m src.deepstack.probe` when RUN_PROBE=True, else evaluate.py. | yes — one-click probe run on Colab
+
 [2026-06-01] | [project-setup] | Created CLAUDE.md (operating instructions), paper.md (full research context), and log.md (this file). Established project structure for DeepStack-Aware Visual Token Budgeting research. | yes — foundational setup
 
 [2026-06-01] | [codebase-cleanup] | Deleted src/__pycache__, scripts/setup_branch_protection.py, docs/compile.bat. Created empty package scaffolding: src/deepstack/ (probe, ablation, prune, budget) and src/experiments/ (exp_sensitivity, exp_budgeting, exp_scoring, exp_latency, exp_pareto). Added root requirements.txt and results/README.md documenting 9 baseline runs. | yes — clean starting point for Phase 1

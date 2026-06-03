@@ -334,14 +334,40 @@ Use small subsets first (500–2,000 examples). A strong controlled study on a s
 
 ## 13. Implementation Plan
 
-### Phase 1: Understand Qwen3-VL DeepStack Internals
-Identify:
-- Where ViT layer features are extracted
-- Which layers become DeepStack groups (currently: layers 8, 16, 24 of the 27-layer vision encoder)
-- Where `deepstack_visual_embeds` are stored
-- Where they are injected into decoder hidden states
-- Token shape per group
-- Whether token pruning before injection breaks positional encoding
+### Phase 1: Understand Qwen3-VL DeepStack Internals — ✅ MAPPED
+
+Verified directly against `local_transformers/models/qwen3_vl/` (dense model) and confirmed at
+runtime by the non-invasive probe `src/deepstack/probe.py` (writes
+`results/<ts>/deepstack_probe.json`). Findings:
+
+- **ViT feature extraction** — `Qwen3VLVisionModel.forward` runs the 27 vision blocks; at each
+  layer in `deepstack_visual_indexes` it passes that block's hidden state through a dedicated
+  `Qwen3VLVisionPatchMerger` and appends the result to `deepstack_feature_lists`. The forward
+  returns `(final_hidden_states, deepstack_feature_lists)`.
+  *(modeling_qwen3_vl.py:737-753)*
+- **Groups** — **3 groups**, tapped at vision layers **`[8, 16, 24]`** of 27
+  (`Qwen3VLVisionConfig.deepstack_visual_indexes`, configuration_qwen3_vl.py:42). One
+  `PatchMerger` per group (modeling_qwen3_vl.py:590-599).
+- **Where `deepstack_visual_embeds` are built** — in `Qwen3VLModel.forward` the per-group features
+  are aligned to the visual placeholder positions, producing `visual_pos_masks` (bool, `(B, seq)`)
+  and `deepstack_visual_embeds` (list of `(num_visual_positions, out_hidden_size)` tensors,
+  `out_hidden_size=3584`). *(modeling_qwen3_vl.py:1153-1175)*
+- **Injection** — in `Qwen3VLTextModel.forward`, after decoder layer `i` for
+  `i in range(len(deepstack_visual_embeds))` (i.e. **decoder layers 0, 1, 2**), `_deepstack_process`
+  **adds** group `i` onto the visual rows of the hidden state:
+  `hidden_states[visual_pos_masks] += deepstack_visual_embeds[i]`. So vision layer 8→dec layer 0,
+  16→1, 24→2. *(modeling_qwen3_vl.py:849-867, 876-883)*
+- **Token shape per group** — `(num_visual_positions, 3584)`; `num_visual_positions` equals
+  `Σ t·(h//spatial_merge_size)·(w//spatial_merge_size)` over `image_grid_thw`
+  (`spatial_merge_size=2`). The probe cross-checks the measured count against this formula.
+- **Does pruning break positional encoding / the model?** The injection is a **strict 1:1
+  count-contract**: `deepstack_visual_embeds[i].shape[0]` MUST equal `visual_pos_masks.sum()`
+  (fixed by the prompt's image-placeholder tokens). MRoPE position IDs are computed once
+  (modeling_qwen3_vl.py:846) and are **not** touched by injection. Therefore **naively dropping
+  tokens from a group breaks the injection add (shape mismatch)** — confirmed by the probe's
+  mutation test. The viable pruning pattern for Phase 4 is **prune-then-reconstruct-to-full-length**:
+  select a subset, scatter kept tokens back into a full-length zero-filled tensor so the count
+  (and thus position alignment) stays valid. The probe demonstrates this reconstruction passes.
 
 ### Phase 2: Add Measurement Hooks
 Log:
@@ -519,7 +545,7 @@ Produce:
 
 - [x] Comprehensive research review complete
 - [x] CLAUDE.md and paper.md created
-- [ ] Phase 1: DeepStack internals mapped in `local_transformers/`
+- [x] Phase 1: DeepStack internals mapped in `local_transformers/` (probe: `src/deepstack/probe.py`; see §13 Phase 1)
 - [ ] Phase 2: Measurement hooks implemented
 - [ ] Phase 3: Ablation switches implemented
 - [ ] Phase 4: Pruning implemented

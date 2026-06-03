@@ -42,6 +42,8 @@ The user will use these log entries as references when writing the paper.
 
 ## Colab GPU Workflow
 
+**HARD RULE — never run the model locally.** Any script that loads or runs the Qwen3-VL model (`src/evaluate.py`, `src/deepstack/probe.py`, any inference / profiling / benchmark / ablation) MUST run on the Colab GPU via `colab_run.ipynb` — never via local `python …`. The local machine has no CUDA GPU and the user controls the Colab runs. When something needs to actually run the model, do NOT execute it; wire it into `colab_run.ipynb` and tell the user to Run all on colab.research.google.com, then retrieve results via `git pull`. Locally allowed: editing code, `py_compile`/syntax checks, linting, reading files.
+
 Heavy runs (model inference, profiling, benchmarks) execute on a Colab GPU via `colab_run.ipynb`, not locally. Local machine has no CUDA GPU. The data flow:
 
 ```
