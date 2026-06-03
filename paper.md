@@ -614,12 +614,58 @@ table directly parameterizes this:
 G0 being expendable (and mildly harmful for text tasks) is the most immediately actionable finding:
 pruning G0 most aggressively is safe across all tasks and may marginally improve OCR performance.
 
-### Phase 4: Implement Pruning (start simple)
-Order:
-1. Random pruning per group
-2. Spatial uniform pruning per group
-3. Attention/saliency pruning per group
-4. Hybrid scoring
+### Phase 4: Implement Pruning — ✅ IMPLEMENTED (run pending on Colab)
+
+**The hard constraint (from Phase 1).** DeepStack injection is a strict 1:1 additive op
+(`hidden_states[visual_pos_masks] += deepstack_visual_embeds[i]`), so a group's embeds tensor MUST
+keep exactly `visual_pos_masks.sum()` rows or the add crashes (proven by the Phase 1 probe mutation
+test). Therefore "pruning" is implemented as **reconstruct-to-full-length**: score all N tokens,
+choose k to keep, and **zero the (N−k) pruned rows** while preserving the `(N, D)` shape. A zeroed
+row contributes 0 to the additive injection — exactly as if its feature were never injected — while
+the count contract and MRoPE positions stay valid.
+
+**Pruning module — `src/deepstack/prune.py`.** Five within-group scorers (paper.md §6 Level 2),
+each returning **exactly `k = round(keep_ratio·N)` unique kept indices** so methods are compared at
+an identical retained-token count (the fairness requirement of Experiment 3/4):
+
+1. **`random`** — uniform random keep (seeded). The control; a useful scorer must beat it.
+2. **`spatial_uniform`** — even subsample on the merged token grid (true 2D row/column lattice when a
+   single image's `grid_thw` is known; flat raster stride otherwise / multi-image). Tests whether
+   spatial coverage alone explains any gains.
+3. **`activation_magnitude`** — keep highest per-token L2 norm. Primary vision-side signal (Phase 2
+   showed decoder attention is an informative null). *Known weakness:* Phase 1/2 found G0 has outlier
+   "sink" tokens (max norm ≈ 9× mean) that hijack pure magnitude — motivating the diversity term.
+4. **`diversity`** — farthest-point sampling (FPS) in a fixed 32-d random projection of the
+   L2-normalized features; seeded by hidden size so it is deterministic. Keeps a feature-space-spread
+   subset, avoiding near-duplicates.
+5. **`hybrid`** — magnitude-seeded greedy selection maximizing `α·norm_z + β·min_dist_to_selected`
+   (α=β=0.5). The paper's proposed `saliency + magnitude + diversity_bonus`; same O(N·k) cost as FPS,
+   balances "keep strong" and "keep diverse".
+
+`DeepStackPruner` is a non-invasive context manager (mirrors `DeepStackAblator`, edits no model
+source): a pre-hook on `Qwen3VLTextModel.forward` prunes each configured group's embeds before
+injection; a pre-hook on `Qwen3VLModel.forward` captures `image_grid_thw` for the spatial scorer.
+Greedy selection keeps all ops on-device (no per-step host sync) so it stays cheap on the GPU.
+Local verification (CPU, no model): the full-length contract holds for every scorer at
+keep_ratio ∈ {1.0, 0.75, 0.50, 0.25}, all return exact-k unique indices, magnitude retains the sink
+tokens, and the no-grid / multi-image fallbacks return the right count.
+
+**Experiment runner — `src/experiments/exp_scoring.py` (Experiment 4).** For each task × scorer ×
+keep-ratio it applies a **uniform budget across all 3 groups** (same keep-ratio per group) — this
+isolates *which tokens to keep* from *how to split the budget across groups* (the latter is Phase 5).
+It reuses the Phase 3 task registry and scorers (VQA soft-accuracy / ANLS / integer exact-match) and
+measures labeled accuracy plus first-token KL vs the no-pruning baseline. Conditions: 1 baseline +
+5 methods × 3 pruning ratios = 16; default 100 samples/task → 6,400 generations. Writes
+`results/<ts>/scoring.json`.
+
+**Visualization — `src/deepstack/visualize_scoring.py`**: `scoring_accuracy_curves.png` (per-task
+accuracy vs keep-ratio, one line per scorer), `scoring_bar_at_50pct.png` (grouped bars at keep-ratio
+0.50), and a data-driven `EXPLAINER_scoring.md`. Wired into `colab_run.ipynb` via the `RUN_SCORING`
+toggle.
+
+#### Phase 4 Findings
+_Pending the Colab run (RUN_SCORING=True). To be filled with the scorer comparison table and the
+decision on which within-group scorer to fix for Phase 5._
 
 ### Phase 5: Implement Budgeting
 Fixed budget schedules to test:
@@ -776,7 +822,7 @@ Produce:
 - [x] Phase 1: DeepStack internals mapped in `local_transformers/` (probe: `src/deepstack/probe.py`; see §13 Phase 1)
 - [x] Phase 2: Measurement hooks implemented + run + figures (`src/deepstack/instrument.py`, `visualize.py`; results/20260603_080941). Headline: non-uniform within-group dispersion (CV 0.61/0.45/0.42) = the dispersion lens; attention is an informative null. See §13 Phase 2 Findings
 - [x] Phase 3: Ablation switches + sensitivity experiment run (`results/20260603_184741`). Verdict: WEAK GO — task-dependent sensitivity confirmed. G2 (deep) is critical for OCR/text (TextVQA drop_g2=−4%); G0 (shallow) is expendable and mildly harmful for detail tasks; groups are interchangeable for counting/general VQA. See §13 Phase 3 Findings
-- [ ] Phase 4: Pruning implemented
+- [~] Phase 4: Pruning implemented (`src/deepstack/prune.py` — 5 scorers + reconstruct-to-full-length contract; `src/experiments/exp_scoring.py`, `visualize_scoring.py`; wired into colab_run.ipynb). Code done + locally verified; **Colab run pending** (RUN_SCORING=True). See §13 Phase 4
 - [ ] Phase 5: Budgeting implemented
 - [ ] Phase 6: Full benchmark run
 - [ ] Phase 7: Analysis and figures
