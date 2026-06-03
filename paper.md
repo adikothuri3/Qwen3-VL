@@ -614,7 +614,7 @@ table directly parameterizes this:
 G0 being expendable (and mildly harmful for text tasks) is the most immediately actionable finding:
 pruning G0 most aggressively is safe across all tasks and may marginally improve OCR performance.
 
-### Phase 4: Implement Pruning — ✅ IMPLEMENTED (run pending on Colab)
+### Phase 4: Implement Pruning — ✅ DONE (run `results/20260603_204751`)
 
 **The hard constraint (from Phase 1).** DeepStack injection is a strict 1:1 additive op
 (`hidden_states[visual_pos_masks] += deepstack_visual_embeds[i]`), so a group's embeds tensor MUST
@@ -663,9 +663,85 @@ accuracy vs keep-ratio, one line per scorer), `scoring_bar_at_50pct.png` (groupe
 0.50), and a data-driven `EXPLAINER_scoring.md`. Wired into `colab_run.ipynb` via the `RUN_SCORING`
 toggle.
 
-#### Phase 4 Findings
-_Pending the Colab run (RUN_SCORING=True). To be filled with the scorer comparison table and the
-decision on which within-group scorer to fix for Phase 5._
+#### Phase 4 Findings (100 samples/task, Qwen3-VL-2B-Instruct, T4, fp16 — `results/20260603_204751`)
+
+**Read the KL, not the raw accuracy.** At n=100 the labeled-accuracy metric is dominated by noise:
+~40% of the (task × scorer × ratio) cells show a *negative* drop (pruning "improving" accuracy),
+which is impossible in expectation — the same ±1–2% variance Phase 3 flagged. The auto-generated
+`EXPLAINER_scoring.md` ranks scorers by this noisy accuracy and therefore picks different "winners"
+per task (random/spatial/diversity); that ranking is an artifact of the noise. The reliable signal is
+the **first-token KL(P_full ‖ P_pruned)**, which is dense and rises smoothly and monotonically as the
+keep-ratio drops (0.75 → 0.50 → 0.25) for every scorer, confirming the prune hook genuinely bites.
+
+**Caveat on the KL signal (stated up front):** KL measures how far pruning shifts the output
+distribution, and `activation_magnitude` keeps the largest additive features, so it *mechanically*
+minimizes the L2 perturbation to the hidden state → low KL. So magnitude winning on KL is partly
+structural. What rescues the finding from circularity is that **accuracy independently agrees on the
+one task clean enough to read it** — DocVQA at keep-ratio 0.25 (highest baseline, lowest-variance
+ANLS): random +3.9% (worst in the experiment), spatial +2.5%, diversity +2.7%, hybrid +0.2%,
+**magnitude −0.8% (best)**. Accuracy is not circular (it scores task correctness, not distribution
+distance), and it confirms magnitude/hybrid ≫ random/spatial/diversity.
+
+**KL win-count across all 12 (task × pruning-ratio) cells — lower KL = better token selection:**
+
+| scorer | cells won | role |
+|---|---|---|
+| activation_magnitude | **6** | best overall; dominant on detail tasks (DocVQA, counting) |
+| hybrid | **5** | tied; best on text/soft tasks (TextVQA, general VQA) |
+| random | 1 | only at 0.75, where all scorers are within noise |
+| diversity | **0** | never wins; sometimes *worse* than random (counting@0.25) |
+| spatial_uniform | **0** | never wins; often the worst (e.g. general_vqa@0.50 KL 0.048 ≈ 3× magnitude's 0.015) |
+
+Representative KL at the aggressive keep-ratio 0.25 (random / spatial / magnitude / diversity / hybrid):
+general_vqa 0.036 / 0.043 / 0.030 / 0.044 / **0.028**; textvqa 0.114 / 0.105 / 0.086 / 0.098 / **0.066**;
+docvqa 0.173 / 0.173 / **0.120** / 0.163 / 0.121; counting 0.069 / 0.072 / **0.049** / 0.087 / 0.067.
+
+**Finding 1 — Activation magnitude wins; the sink tokens were the signal, not the problem.**
+Phase 1/2 worried that G0's outlier massive-activation tokens (max norm ≈ 9× mean) would *hijack*
+magnitude scoring. The data shows the opposite: keeping high-norm tokens is exactly right. Massive-
+activation tokens are functionally critical in transformers (attention sinks / global-info stores);
+magnitude correctly identifies them as load-bearing rather than being fooled by them.
+
+**Finding 2 — Diversity (FPS) fails — a genuine negative result.** The paper's prior (echoing
+VisPruner's duplicate-removal intuition, and the Phase 1 note that "the diversity term matters most
+for group 0") predicted diversity would help, especially for the redundant shallow group. It does
+not: pure farthest-point sampling discards the high-norm tokens that matter and is the *worst* scorer
+on counting@0.25. **The VisPruner-style diversity intuition does not transfer to DeepStack additive
+groups.** This supersedes the Phase 1 speculation.
+
+**Finding 3 — Spatial coverage is not what matters; feature content is.** `spatial_uniform` is
+consistently near-worst. Keeping an even spatial grid is much worse than keeping high-activation
+tokens — killing the "you only need spatial coverage" alternative explanation. The gains are about
+*which features*, not *where*.
+
+**Finding 4 — DeepStack's additive refinement is highly compressible (large headroom).** At
+keep-ratio 0.50, every scorer holds accuracy within noise on every task; at 0.25, magnitude *gains*
+on DocVQA (−0.8%) and counting (−3%). KL grows to 0.12–0.17 at 0.25 while accuracy barely moves —
+aggressive pruning perturbs the model's *confidence* but rarely flips the *answer*. Strong evidence
+that the DeepStack token mass is redundant and has real pruning headroom (the paper's core premise).
+
+**Reconciliation with Phase 3.** Consistent and mutually reinforcing: TextVQA (Phase 3's fragile
+OCR task, G2-critical) is exactly where scorer choice matters most and where hybrid pulls ahead at
+aggressive pruning; DocVQA is scorer-sensitive (bad scorers cost +3.9%, magnitude costs nothing);
+counting/general VQA are robust (flattest curves, smallest KL).
+
+**Two caveats to carry forward.**
+1. *Noise:* accuracy at n=100 can only rank scorers at the extremes; the KL ranking is solid but
+   structurally favors magnitude. Both signals point the same way (the strongest available form of
+   the claim), but a citable headline number ("magnitude beats random by X%") needs 500+ samples.
+2. *No latency win here, by design:* the reconstruct-to-full-length prune zeroes a token's additive
+   refinement but does **not** shorten the sequence — the token position still exists. Phase 4 is the
+   diagnostic that establishes *which tokens to keep*; it yields no speedup on its own. Real
+   efficiency requires an actual sequence-shortening mechanism, and §10 Experiment 5's warning
+   applies (token cuts don't automatically become wall-clock gains — measure them).
+
+**Decision for Phase 5.** Fix the within-group scorer to **`activation_magnitude`** (parameter-free,
+deterministic, fastest, wins the most cells, best on detail tasks). Report **`hybrid`** as an
+ablation (marginal, task-dependent gain on text tasks; its diversity component adds little). **Drop
+`diversity` and `spatial_uniform`** — document them as the controls that lost. The 50–75% headroom
+means Phase 5's differential budgets have room to work: combine with Phase 3's group sensitivity
+(G0 expendable, G2 critical for OCR) to test schedules that prune G0 hard and protect G2, using
+magnitude selection within each group.
 
 ### Phase 5: Implement Budgeting
 Fixed budget schedules to test:
@@ -822,7 +898,7 @@ Produce:
 - [x] Phase 1: DeepStack internals mapped in `local_transformers/` (probe: `src/deepstack/probe.py`; see §13 Phase 1)
 - [x] Phase 2: Measurement hooks implemented + run + figures (`src/deepstack/instrument.py`, `visualize.py`; results/20260603_080941). Headline: non-uniform within-group dispersion (CV 0.61/0.45/0.42) = the dispersion lens; attention is an informative null. See §13 Phase 2 Findings
 - [x] Phase 3: Ablation switches + sensitivity experiment run (`results/20260603_184741`). Verdict: WEAK GO — task-dependent sensitivity confirmed. G2 (deep) is critical for OCR/text (TextVQA drop_g2=−4%); G0 (shallow) is expendable and mildly harmful for detail tasks; groups are interchangeable for counting/general VQA. See §13 Phase 3 Findings
-- [~] Phase 4: Pruning implemented (`src/deepstack/prune.py` — 5 scorers + reconstruct-to-full-length contract; `src/experiments/exp_scoring.py`, `visualize_scoring.py`; wired into colab_run.ipynb). Code done + locally verified; **Colab run pending** (RUN_SCORING=True). See §13 Phase 4
+- [x] Phase 4: Pruning implemented + run (`results/20260603_204751`). 5 scorers + reconstruct-to-full-length contract (`src/deepstack/prune.py`, `exp_scoring.py`, `visualize_scoring.py`). Verdict (read via first-token KL; raw accuracy is noise at n=100): **activation_magnitude wins** (best on detail tasks), hybrid ties (best on text tasks), **diversity and spatial_uniform lose** (negative results). DeepStack refinement is highly compressible — 50–75% droppable with accuracy within noise. Phase 5 fixes the scorer to magnitude. See §13 Phase 4 Findings
 - [ ] Phase 5: Budgeting implemented
 - [ ] Phase 6: Full benchmark run
 - [ ] Phase 7: Analysis and figures
