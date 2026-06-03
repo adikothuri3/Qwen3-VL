@@ -1,0 +1,13 @@
+torch>=2.0.0
+torchvision
+torchaudio
+transformers>=4.57.0
+accelerate
+qwen-vl-utils
+huggingface_hub
+matplotlib
+numpy
+tqdm
+pandas
+requests
+validators

@@ -24,3 +24,9 @@ Thumbs.db
 # Environment
 .env
 *.log
+
+# Virtual environment
+.venv/
+
+# Model weights (never commit)
+models/

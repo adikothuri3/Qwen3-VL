@@ -1,0 +1,17 @@
+[
+  {
+    "sample_id": "demo_sample",
+    "preprocessing_time": 4.825377702713013,
+    "generation_time": 18238.380352020264,
+    "decoding_time": 0.1563889980316162,
+    "total_time": 18243.362638950348,
+    "input_tokens": 2766,
+    "output_tokens": 32,
+    "tokens_per_second": 0.0017545417620625158,
+    "max_new_tokens": 32,
+    "temperature": 0.1,
+    "output_text": "This is a heartwarming photograph capturing a tender moment between a woman and her dog on a sandy beach at sunset.\n\nThe scene is set on a wide,",
+    "success": true,
+    "error_message": null
+  }
+]
