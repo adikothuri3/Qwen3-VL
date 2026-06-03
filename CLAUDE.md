@@ -53,10 +53,10 @@ Colab --git push--> GitHub --git pull--> local repo   (results come back)
 - **Code** (edits to `local_transformers/`, new experiments) round-trips through GitHub. To test a change on GPU: commit + push locally, then in Colab run the notebook (Cell 2 pulls the latest).
 - **Model weights** (~4.5 GB) live in Google Drive only (`/content/drive/MyDrive/Qwen3-VL-models/`), downloaded once and reused. Never committed.
 - **Results** are committed + pushed by the notebook's last cell; pull locally to retrieve them.
-- **Auth**: Colab reads a GitHub fine-grained PAT from Colab Secrets (🔑 icon) as `GITHUB_TOKEN`. The token is never written into the notebook (the notebook is committed to GitHub).
+- **Auth**: the GitHub fine-grained PAT is read as `GITHUB_TOKEN`, resolved in this order: (1) Colab Secrets (🔑 icon) — works **only** when run from the colab.research.google.com web UI; (2) a `GITHUB_TOKEN` environment variable — the fallback for any other kernel (VS Code / local Jupyter), where Colab Secrets time out. The token is never written into the notebook (the notebook is committed to GitHub).
 - **Trace files** (`trace_*.json`) are gitignored — they can be hundreds of MB and stay on Colab/Drive only.
 
-To run an evaluation: open `colab_run.ipynb` in VS Code (Colab kernel) or on colab.research.google.com → set GPU runtime → **Run all**. Only Cell 0 (config: model path, eval args) is meant to be edited.
+To run an evaluation, use the **Colab web UI** (recommended): open `colab_run.ipynb` on colab.research.google.com → Runtime → Change runtime type → GPU (T4) → **Run all**. The 🔑-panel `GITHUB_TOKEN` secret (with *Notebook access* toggled on) resolves natively there. Only Cell 0 (config: model path, eval args) is meant to be edited. Running from a VS Code/local kernel also works but requires `export GITHUB_TOKEN=…` before launching the kernel, since Colab Secrets are unreachable outside the web UI.
 
 ---
 

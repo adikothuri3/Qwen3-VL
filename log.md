@@ -4,6 +4,8 @@ Running log of all moderate changes made during the research project. Each entry
 
 ---
 
+[2026-06-02] | [colab] | Fixed GITHUB_TOKEN loading in colab_run.ipynb Cell 0. Root cause: `userdata.get()` only resolves in the colab.research.google.com web UI; running via a connected kernel (VS Code/local Jupyter) raises TimeoutException ("Secrets can only be fetched when running from the Colab UI"), which the old bare `except Exception` swallowed as a misleading "No GITHUB_TOKEN secret found". Now the except surfaces the real exception type/message and falls back to a GITHUB_TOKEN environment variable, so the notebook works from the Colab UI (Secrets) or any other kernel (env var). | yes — token resolves in both run contexts; precise diagnostics on failure
+
 ## Format
 
 ```
