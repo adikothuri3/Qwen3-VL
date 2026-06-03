@@ -1,5 +1,8 @@
 # DeepStack-Aware Visual Token Budgeting for Efficient Multimodal Inference
 
+https://colab.research.google.com/github/adikothuri3/Qwen3-VL/blob/main/colab_run.ipynb
+
+
 *Living research document — updated as the project evolves.*
 
 ---
@@ -345,21 +348,25 @@ runtime by the non-invasive probe `src/deepstack/probe.py` (writes
   `Qwen3VLVisionPatchMerger` and appends the result to `deepstack_feature_lists`. The forward
   returns `(final_hidden_states, deepstack_feature_lists)`.
   *(modeling_qwen3_vl.py:737-753)*
-- **Groups** — **3 groups**, tapped at vision layers **`[8, 16, 24]`** of 27
-  (`Qwen3VLVisionConfig.deepstack_visual_indexes`, configuration_qwen3_vl.py:42). One
-  `PatchMerger` per group (modeling_qwen3_vl.py:590-599).
+- **Groups** — **3 groups**. The default in `Qwen3VLVisionConfig` is `[8, 16, 24]`
+  (configuration_qwen3_vl.py:42), **but the actual Qwen3-VL-2B-Instruct checkpoint config overrides
+  this to `deepstack_visual_indexes = [5, 11, 17]`** (confirmed at runtime by the probe — always read
+  it from the loaded model, never assume the class default). One `PatchMerger` per group
+  (modeling_qwen3_vl.py:590-599).
 - **Where `deepstack_visual_embeds` are built** — in `Qwen3VLModel.forward` the per-group features
   are aligned to the visual placeholder positions, producing `visual_pos_masks` (bool, `(B, seq)`)
-  and `deepstack_visual_embeds` (list of `(num_visual_positions, out_hidden_size)` tensors,
-  `out_hidden_size=3584`). *(modeling_qwen3_vl.py:1153-1175)*
+  and `deepstack_visual_embeds` (list of `(num_visual_positions, out_hidden_size)` tensors;
+  **measured `out_hidden_size = 2048`** on the 2B model = the text decoder hidden size, so each group
+  is already projected into the LLM space before injection). *(modeling_qwen3_vl.py:1153-1175)*
 - **Injection** — in `Qwen3VLTextModel.forward`, after decoder layer `i` for
   `i in range(len(deepstack_visual_embeds))` (i.e. **decoder layers 0, 1, 2**), `_deepstack_process`
   **adds** group `i` onto the visual rows of the hidden state:
-  `hidden_states[visual_pos_masks] += deepstack_visual_embeds[i]`. So vision layer 8→dec layer 0,
-  16→1, 24→2. *(modeling_qwen3_vl.py:849-867, 876-883)*
-- **Token shape per group** — `(num_visual_positions, 3584)`; `num_visual_positions` equals
+  `hidden_states[visual_pos_masks] += deepstack_visual_embeds[i]`. So vision layer 5→dec layer 0,
+  11→1, 17→2. *(modeling_qwen3_vl.py:849-867, 876-883)*
+- **Token shape per group** — `(num_visual_positions, 2048)`; `num_visual_positions` equals
   `Σ t·(h//spatial_merge_size)·(w//spatial_merge_size)` over `image_grid_thw`
-  (`spatial_merge_size=2`). The probe cross-checks the measured count against this formula.
+  (`spatial_merge_size=2`). Probe cross-check passed: the demo image `grid_thw=[1, 86, 128]` →
+  `1·43·64 = 2752` tokens per group, matching the measured count exactly.
 - **Does pruning break positional encoding / the model?** The injection is a **strict 1:1
   count-contract**: `deepstack_visual_embeds[i].shape[0]` MUST equal `visual_pos_masks.sum()`
   (fixed by the prompt's image-placeholder tokens). MRoPE position IDs are computed once
@@ -369,13 +376,79 @@ runtime by the non-invasive probe `src/deepstack/probe.py` (writes
   select a subset, scatter kept tokens back into a full-length zero-filled tensor so the count
   (and thus position alignment) stays valid. The probe demonstrates this reconstruction passes.
 
-### Phase 2: Add Measurement Hooks
+#### Phase 1 Runtime Results (probe run `results/20260603_050848/`, Qwen3-VL-2B-Instruct, T4, fp16)
+
+Single demo image, `grid_thw = [1, 86, 128]` → **2752 visual tokens per group**, 3 groups, all
+`count_match = PASS`, grid cross-check `MATCH`, mutation test as predicted (naive 25% drop →
+`ValueError: 2752 vs 2064`; reconstruct-to-full → PASS).
+
+**Per-group token L2-norm distribution** (the first real research signal — distributions differ by
+depth, an early prior for the non-uniform-sensitivity hypothesis, though sensitivity itself is
+Experiment 2):
+
+| Group | ViT layer | Inject @ dec | mean | std | min | max |
+|---|---|---|---|---|---|---|
+| 0 | 5 (shallow) | 0 | 15.1 | 9.7 | 8.97 | **141.7** |
+| 1 | 11 (mid) | 1 | 17.9 | 8.8 | 6.72 | 68.4 |
+| 2 | 17 (deep) | 2 | 23.2 | 10.8 | 8.51 | 62.8 |
+
+Observations and what they imply for later phases:
+1. **Norm grows with depth** (15 → 18 → 23). Deeper groups inject larger-magnitude features, so a
+   fixed additive perturbation from pruning is *relatively* smaller deep, larger shallow — a hint
+   that the budget schedule should not be uniform (relevant to Phase 5 budgeting).
+2. **Group 0 is heavy-tailed** (max 141.7 ≈ 9× its mean; std ≈ mean). A few "massive-activation" /
+   sink tokens dominate the shallow group. **Implication for Phase 4 scoring:** pure
+   activation-magnitude scoring will be hijacked by these outliers → the **diversity term in the
+   hybrid score matters most for group 0**; spatial-uniform and diversity baselines are important
+   controls there.
+3. **Visual mass is large:** 2752 tokens × 3 groups = 8256 added visual injections on top of the
+   2752 base-embed tokens — confirms the motivation that DeepStack inflates decoder-side visual mass
+   and that per-group pruning has real headroom.
+4. **`out_hidden_size = 2048` = text hidden size** → groups are pre-projected into LLM space, so
+   pruning/scoring operates directly on injectable 2048-d vectors (no extra projection needed in the
+   prune module).
+
+**Direct consequences for the build (carry into later phases):**
+- Phase 3/4/5 code must read `deepstack_visual_indexes` from the loaded config (`[5, 11, 17]` here),
+  never hard-code `[8,16,24]`. Budgets/ablation index by group position 0/1/2, not by ViT layer.
+- Phase 4 `prune.py` must implement the **reconstruct-to-full-length (scatter + zero-fill)** contract
+  proven here; a naive top-k that returns fewer rows will crash injection.
+- The probe already emits per-group norm stats — Phase 2 extends the same hook scaffold with
+  attention/saliency capture and latency/memory around extraction+injection rather than starting fresh.
+
+### Phase 2: Add Measurement Hooks — ✅ IMPLEMENTED (Colab run pending)
 Log:
 - Token count per DeepStack group
 - Feature norm distributions
 - Attention/saliency scores
 - Latency around feature extraction/injection
 - Memory usage per group
+
+Implemented in `src/deepstack/instrument.py` as a non-invasive `DeepStackInstrumentor` context
+manager (extends the Phase 1 hook scaffold; edits no model source). It runs one prefill forward per
+calibration sample (`CALIBRATION_IMAGES`: natural / OCR-text / chart / counting) and aggregates
+**per-group distributions** over the set:
+
+- **Token count** — from the `deepstack_feature_lists` returned by `Qwen3VLVisionModel.forward`;
+  cross-checked against `visual_pos_masks.sum()` (`count_matches_mask`).
+- **Feature-norm distribution** — per-token L2 norms pooled over tokens×samples → mean/std/min/max,
+  p10/p50/p90, 30-bin histogram (so the depth-increasing, group-0 heavy-tailed norm structure seen in
+  Phase 1 is captured as a full distribution, not a point estimate).
+- **Attention saliency (opt-in, `--capture-attention`)** — forces eager attention, hooks
+  `Qwen3VLTextAttention` at the injection layers (`module.layer_idx`), takes the attention mass
+  *received* by each visual key (mean over batch/heads/queries) → per-group saliency distribution.
+  Off by default (O(seq²); T4-heavy).
+- **Latency** — extraction timed by pre/post hooks on each deepstack `PatchMerger`; injection timed by
+  bracketing decoder layers (injection *i* runs between layer *i*'s return and layer *i+1*'s call), all
+  with CUDA sync.
+- **Memory** — `memory_allocated()` deltas around extraction and injection, plus per-extraction peak
+  via `max_memory_allocated()`.
+
+Group count, vision layers, and `out_hidden_size` are read from the loaded config at runtime, so it
+self-corrects to the actual `[5,11,17]`/`2048` rather than the class defaults. CLI mirrors the probe
+(`--model-id/--device/--dtype/--output-dir/--num-samples/--capture-attention`); writes
+`results/<ts>/deepstack_instrument.json`. Wired into `colab_run.ipynb` via the `RUN_INSTRUMENT`
+toggle. **Findings to be filled after the Colab run.**
 
 ### Phase 3: Implement Ablation Switches
 Add flags:
@@ -546,7 +619,7 @@ Produce:
 - [x] Comprehensive research review complete
 - [x] CLAUDE.md and paper.md created
 - [x] Phase 1: DeepStack internals mapped in `local_transformers/` (probe: `src/deepstack/probe.py`; see §13 Phase 1)
-- [ ] Phase 2: Measurement hooks implemented
+- [~] Phase 2: Measurement hooks implemented (`src/deepstack/instrument.py`; Colab run pending to populate distributions)
 - [ ] Phase 3: Ablation switches implemented
 - [ ] Phase 4: Pruning implemented
 - [ ] Phase 5: Budgeting implemented
