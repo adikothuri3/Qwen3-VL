@@ -852,27 +852,59 @@ at aggressive pruning). The right token-selection signal for DeepStack source-to
 confounded by the intermediate-layer read vs VisPruner's final-layer use. Still diagnostic only —
 zeroing, not sequence-shortening, so no latency/memory win yet (Experiment 5 remains the gate).
 
-### Phase 5: Implement Budgeting
+### Phase 5: Implement Budgeting — Stage A IMPLEMENTED (run pending), task-specialized to General VQA
 
-**Within-group scorer decision (from Phase 4b): use `hybrid`** (magnitude+diversity) — the most robust
-scorer (wins the discriminating DocVQA task, never collapses). `activation_magnitude` is the reported
-simple, parameter-free alternative (near-tied). `vision_attention` is kept only as an ablation /
-negative-result baseline (it underperforms hybrid/magnitude at aggressive pruning); `random`,
-`spatial_uniform`, `diversity` are the documented controls that lost.
+**Scope decision (2026-06-04).** Phase 5 is split into two stages and **specialized to a single task,
+General VQA (VQAv2)** — the most general, widely-used, scalable target. **Stage A** (this phase) finds,
+*for General VQA*, the optimal **per-group keep-budget** `(r0,r1,r2)` and the optimal **within-group
+scorer**, by **zeroing-based** pruning. **Stage B** (deferred, separate plan) realizes the chosen
+optimum as **real sequence-shortening** and benchmarks actual latency/memory vs. the baseline and other
+methods.
 
-Fixed budget schedules to test (per-group keep-ratios for groups G0/G1/G2), all with hybrid selection,
-compared **at equal total retained-token count**:
-```
-[100%, 100%, 100%]  # baseline
-[75%,  75%,  75%]   # uniform
-[50%,  50%,  50%]   # uniform aggressive
-[75%,  50%,  25%]   # decreasing
-[25%,  50%,  75%]   # increasing
-[90%,  50%,  30%]   # sensitivity-calibrated guess
-```
-The Phase 3 group taxonomy (G0 expendable, G2 OCR-critical) + the Phase 4b task taxonomy (DocVQA/
-TextVQA sensitive; general_vqa/counting insensitive) motivate **task-aware** schedules that prune G0
-hard and protect G2 on text tasks. Then: sensitivity-calibrated budgets from the ablation data.
+**Why zeroing for Stage A, and the zeroing-vs-real-pruning distinction (they are NOT the same).**
+Confirmed against the model source: base visual tokens are scattered into the sequence
+(`masked_scatter`, modeling_qwen3_vl.py:1143) and occupy their positions through every layer; DeepStack
+only *adds* per-group refinements onto those positions at decoder layers 0/1/2
+(modeling_qwen3_vl.py:881). So:
+- **Zeroing** a group's refinement at a token removes that depth's additive contribution while the base
+  token still occupies the sequence → sequence length, attention FLOPs, KV-cache, and latency are
+  **unchanged**. It is purely diagnostic, but it is the **only** way to vary the three groups
+  *independently* (they share positions), making it the correct tool for the per-group accuracy search.
+- **Real pruning** drops the base token from the sequence → shorter sequence → real latency/KV-cache
+  win, but with *different* logits (attention renormalizes over fewer keys; MRoPE positions shift). It
+  cannot be done per-group independently. This is Stage B's job, applied to Stage A's optimum.
+Stage A therefore compares methods at an **equal retained-token count** = equal count of non-zeroed
+refinement rows (§10 Experiment 3's fairness unit), not equal sequence length.
+
+**Within-group scorer (from Phase 4b): `hybrid` is the prior favorite** (magnitude+diversity; most
+robust, never collapses), with `activation_magnitude` the near-tied parameter-free alternative and
+`vision_attention` the literature ablation. Stage A does **not** assume the winner — it sweeps **all
+four scorers** (`random`, `activation_magnitude`, `hybrid`, `vision_attention`) and picks the best on
+General VQA empirically.
+
+**Stage A experiment (implemented; awaiting Colab run).** Two modes in
+`src/experiments/exp_budgeting.py`, driven by `src/deepstack/budget.py` and the Phase-4
+`DeepStackPruner` (now with `set_keep_indices` for the global-top-k baseline):
+- **`sweep`** — prune **each group independently** (others full) from 100%→0% in **5% steps**, for
+  **every scorer**, on a General VQA calibration set (default 100). Records VQA soft-accuracy +
+  first-token KL vs the no-pruning baseline → per-group sensitivity curves + the best scorer. Writes
+  `budgeting_sweep.json`. (The `r=0` endpoint of each group's curve is a built-in anchor: it must
+  reproduce Phase 3's `drop_g{i}`.)
+- **`validate`** — water-fill the measured curves into candidate **joint** budgets `(r0,r1,r2)` at
+  target average keep-ratios {0.7, 0.5, 0.3} (best scorer), and run them head-to-head vs **uniform**
+  `(T,T,T)` and a flat **global top-k** baseline on a **disjoint held-out split** (default 300), all at
+  an **equal retained-token count**, with bootstrap 95% CIs. Writes `budgeting_validation.json` — the
+  Stage-A deliverable (best scorer + best per-group budget + the per-group-vs-uniform-vs-global verdict).
+
+**Honest expectation for General VQA.** Phase 3/4b found it **compression-insensitive** (groups
+individually interchangeable; negative drops persisted at n=300). So the per-group-beats-uniform signal
+may be weak here — a tie with uniform is a plausible, *reportable* outcome ("General VQA tolerates
+aggressive uniform pruning; a simpler policy suffices"), and the large compressibility headroom + the
+empirical scorer choice remain solid, scalable results. The per-group contrast is strongest on
+OCR/text (DocVQA/TextVQA) and can be added later.
+
+The earlier fixed-schedule list (uniform / decreasing / increasing / sensitivity-calibrated guesses)
+is superseded by the data-driven water-filling search above.
 
 ### Phase 6: Benchmark
 Run all methods with fixed settings.
@@ -1019,6 +1051,6 @@ Produce:
 - [x] Phase 3: Ablation switches + sensitivity experiment run (`results/20260603_184741`). Verdict: WEAK GO — task-dependent sensitivity confirmed. G2 (deep) is critical for OCR/text (TextVQA drop_g2=−4%); G0 (shallow) is expendable and mildly harmful for detail tasks; groups are interchangeable for counting/general VQA. See §13 Phase 3 Findings
 - [x] Phase 4: Pruning implemented + run 1 (`results/20260603_204751`). 5 scorers + reconstruct-to-full-length contract. Solid results: **controls (random/spatial/diversity) lose**; **DeepStack refinement is highly compressible** (50–75% droppable within noise). NOT settled: magnitude vs hybrid (dead heat; KL is biased toward magnitude; accuracy is noise at n=100). See §13 Phase 4 Findings + correction banner
 - [x] Phase 4b: Vision-encoder attention scorer (`vision_attention`, CLS-free VisPruner/FasterVLM signal) + accuracy-led 300-sample re-run (`results/20260604_001256`). Verdict: **`vision_attention` does NOT win** — competitive only at mild pruning on text tasks, near-random at aggressive pruning, beaten by hybrid/magnitude on DocVQA@0.25 (tested negative result; attributed to intermediate-layer read + CLS-free attention-sink). **`hybrid` is the most robust scorer** (magnitude near-tied); random loses; headroom confirmed (50% ~free). Both attention families now ruled out → selection signal is feature-based. Phase 5 scorer = hybrid. See §13 Phase 4b Findings
-- [ ] Phase 5: Budgeting implemented
+- [~] Phase 5: Budgeting — **Stage A implemented** (code only; Colab run pending). Specialized to General VQA; `src/deepstack/budget.py` + `src/experiments/exp_budgeting.py` (`sweep`/`validate`) + `src/deepstack/visualize_budgeting.py`. Independent per-group 5% sweep × all 4 scorers (zeroing), then water-filled joint budgets vs uniform vs global-topk at equal retained-token count. Stage B (real sequence-shortening + latency) deferred. See §13 Phase 5
 - [ ] Phase 6: Full benchmark run
 - [ ] Phase 7: Analysis and figures

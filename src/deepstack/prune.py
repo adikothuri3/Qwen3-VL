@@ -307,10 +307,21 @@ class DeepStackPruner:
         # per-group externally-supplied token scores (for score-based methods, e.g.
         # vision_attention); set per sample via set_vision_scores, cleared otherwise.
         self._scores: Dict[int, torch.Tensor] = {}
+        # per-group explicit keep-index sets; when present for a group they override
+        # spec-based selection (used by the global-top-k budget baseline, which picks
+        # tokens across group boundaries). Set via set_keep_indices, cleared with None.
+        self._keep_indices: Dict[int, torch.Tensor] = {}
         self._handles: List[Any] = []
 
     def set_specs(self, group_specs: Dict[int, PruneSpec]) -> None:
         self._specs = dict(group_specs)
+
+    def set_keep_indices(self, keep_indices: Optional[Dict[int, torch.Tensor]]) -> None:
+        """Set (or clear with None) explicit per-group keep-index sets. When a group
+        has an entry here, its embeds are reconstruct-to-full-length pruned to exactly
+        those rows, bypassing scorer selection. Takes precedence over set_specs for
+        that group."""
+        self._keep_indices = dict(keep_indices) if keep_indices else {}
 
     def set_vision_scores(self, scores: Optional[Dict[int, torch.Tensor]]) -> None:
         """Set (or clear with None) the per-group token scores used by score-based
@@ -339,13 +350,23 @@ class DeepStackPruner:
             self._grid = None
 
     def _text_pre_hook(self, _module: Any, _args: Any, kwargs: Dict[str, Any]) -> None:
-        if not self._specs:
+        if not self._specs and not self._keep_indices:
             return
         embeds: Optional[List[torch.Tensor]] = kwargs.get("deepstack_visual_embeds")
         if not embeds:  # None (decode step) or empty -> nothing to prune
             return
+        # Explicit keep-index groups (e.g. global-top-k) override scorer selection.
+        for gi, keep in self._keep_indices.items():
+            if not (0 <= gi < len(embeds)):
+                continue
+            emb = embeds[gi]
+            out = torch.zeros_like(emb)
+            idx = keep.to(emb.device)
+            if idx.numel():
+                out[idx] = emb[idx]
+            embeds[gi] = out
         for gi, spec in self._specs.items():
-            if not (0 <= gi < len(embeds)) or spec.keep_ratio >= 1.0:
+            if gi in self._keep_indices or not (0 <= gi < len(embeds)) or spec.keep_ratio >= 1.0:
                 continue
             scores = self._scores.get(gi) if spec.method in SCORE_BASED_METHODS else None
             if spec.method in SCORE_BASED_METHODS and scores is None:
