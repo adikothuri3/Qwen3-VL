@@ -1,0 +1,175 @@
+{
+  "model_source": "/content/Qwen3-VL/local_transformers/models/qwen3_vl/modeling_qwen3_vl.py",
+  "device": "cuda",
+  "dtype": "float16",
+  "num_groups": 3,
+  "vision_layers": [
+    5,
+    11,
+    17
+  ],
+  "budget_mode": "uniform_all_groups",
+  "methods": [
+    "random",
+    "activation_magnitude",
+    "hybrid",
+    "vision_attention"
+  ],
+  "keep_ratios": [
+    1.0,
+    0.5,
+    0.25
+  ],
+  "tasks": [
+    "general_vqa",
+    "textvqa",
+    "docvqa",
+    "counting"
+  ],
+  "requested_samples": 300,
+  "max_new_tokens": 32,
+  "samples_per_task": {
+    "general_vqa": 300,
+    "textvqa": 300,
+    "docvqa": 300,
+    "counting": 300
+  },
+  "accuracy": {
+    "general_vqa": {
+      "full": 0.8177777777777777,
+      "random@0.50": 0.8222222222222222,
+      "activation_magnitude@0.50": 0.8311111111111111,
+      "hybrid@0.50": 0.8255555555555556,
+      "vision_attention@0.50": 0.8222222222222222,
+      "random@0.25": 0.8222222222222223,
+      "activation_magnitude@0.25": 0.8244444444444444,
+      "hybrid@0.25": 0.82,
+      "vision_attention@0.25": 0.82
+    },
+    "textvqa": {
+      "full": 0.8244444444444444,
+      "random@0.50": 0.8044444444444444,
+      "activation_magnitude@0.50": 0.8122222222222221,
+      "hybrid@0.50": 0.8155555555555555,
+      "vision_attention@0.50": 0.8222222222222222,
+      "random@0.25": 0.8077777777777777,
+      "activation_magnitude@0.25": 0.8144444444444444,
+      "hybrid@0.25": 0.8122222222222222,
+      "vision_attention@0.25": 0.7933333333333333
+    },
+    "docvqa": {
+      "full": 0.8922611582806718,
+      "random@0.50": 0.8825770862151627,
+      "activation_magnitude@0.50": 0.8847797956564273,
+      "hybrid@0.50": 0.8919223187576218,
+      "vision_attention@0.50": 0.8738070078233454,
+      "random@0.25": 0.8319351482124031,
+      "activation_magnitude@0.25": 0.8708508009160789,
+      "hybrid@0.25": 0.8723924675827455,
+      "vision_attention@0.25": 0.861086138076948
+    },
+    "counting": {
+      "full": 0.8133333333333334,
+      "random@0.50": 0.81,
+      "activation_magnitude@0.50": 0.83,
+      "hybrid@0.50": 0.8333333333333334,
+      "vision_attention@0.50": 0.8233333333333334,
+      "random@0.25": 0.82,
+      "activation_magnitude@0.25": 0.84,
+      "hybrid@0.25": 0.8233333333333334,
+      "vision_attention@0.25": 0.8233333333333334
+    }
+  },
+  "accuracy_drop": {
+    "general_vqa": {
+      "full": 0.0,
+      "random@0.50": -0.004444444444444473,
+      "activation_magnitude@0.50": -0.01333333333333342,
+      "hybrid@0.50": -0.007777777777777883,
+      "vision_attention@0.50": -0.004444444444444473,
+      "random@0.25": -0.004444444444444584,
+      "activation_magnitude@0.25": -0.00666666666666671,
+      "hybrid@0.25": -0.0022222222222222365,
+      "vision_attention@0.25": -0.0022222222222222365
+    },
+    "textvqa": {
+      "full": 0.0,
+      "random@0.50": 0.020000000000000018,
+      "activation_magnitude@0.50": 0.012222222222222356,
+      "hybrid@0.50": 0.008888888888888946,
+      "vision_attention@0.50": 0.0022222222222222365,
+      "random@0.25": 0.01666666666666672,
+      "activation_magnitude@0.25": 0.010000000000000009,
+      "hybrid@0.25": 0.012222222222222245,
+      "vision_attention@0.25": 0.03111111111111109
+    },
+    "docvqa": {
+      "full": 0.0,
+      "random@0.50": 0.00968407206550903,
+      "activation_magnitude@0.50": 0.007481362624244481,
+      "hybrid@0.50": 0.0003388395230499164,
+      "vision_attention@0.50": 0.018454150457326346,
+      "random@0.25": 0.060326010068268654,
+      "activation_magnitude@0.25": 0.021410357364592847,
+      "hybrid@0.25": 0.019868690697926294,
+      "vision_attention@0.25": 0.031175020203723758
+    },
+    "counting": {
+      "full": 0.0,
+      "random@0.50": 0.0033333333333332993,
+      "activation_magnitude@0.50": -0.016666666666666607,
+      "hybrid@0.50": -0.020000000000000018,
+      "vision_attention@0.50": -0.010000000000000009,
+      "random@0.25": -0.006666666666666599,
+      "activation_magnitude@0.25": -0.026666666666666616,
+      "hybrid@0.25": -0.010000000000000009,
+      "vision_attention@0.25": -0.010000000000000009
+    }
+  },
+  "kl": {
+    "general_vqa": {
+      "full": 0.0,
+      "random@0.50": 0.022368944285724657,
+      "activation_magnitude@0.50": 0.015383800859122445,
+      "hybrid@0.50": 0.016855482848075493,
+      "vision_attention@0.50": 0.02213792088922635,
+      "random@0.25": 0.041737754576065905,
+      "activation_magnitude@0.25": 0.03294819156329551,
+      "hybrid@0.25": 0.03292407086609696,
+      "vision_attention@0.25": 0.04002661575378615
+    },
+    "textvqa": {
+      "full": 0.0,
+      "random@0.50": 0.07138052792694669,
+      "activation_magnitude@0.50": 0.053930091258610716,
+      "hybrid@0.50": 0.03778395481628715,
+      "vision_attention@0.50": 0.03625881637867182,
+      "random@0.25": 0.13151726059477822,
+      "activation_magnitude@0.25": 0.08198722480212094,
+      "hybrid@0.25": 0.07066830841755696,
+      "vision_attention@0.25": 0.11427963119814402
+    },
+    "docvqa": {
+      "full": 0.0,
+      "random@0.50": 0.10569763054551364,
+      "activation_magnitude@0.50": 0.07044798379252465,
+      "hybrid@0.50": 0.05398415986835459,
+      "vision_attention@0.50": 0.057943457463595964,
+      "random@0.25": 0.24756616875764167,
+      "activation_magnitude@0.25": 0.1643477280108213,
+      "hybrid@0.25": 0.1342142707199048,
+      "vision_attention@0.25": 0.15251589473670255
+    },
+    "counting": {
+      "full": 0.0,
+      "random@0.50": 0.04302791725950537,
+      "activation_magnitude@0.50": 0.024344818486878382,
+      "hybrid@0.50": 0.026015357171335178,
+      "vision_attention@0.50": 0.0457483148166304,
+      "random@0.25": 0.09885851392539621,
+      "activation_magnitude@0.25": 0.05356326822445672,
+      "hybrid@0.25": 0.060717895940333146,
+      "vision_attention@0.25": 0.09167864396819979
+    }
+  }
+}
