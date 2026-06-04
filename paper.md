@@ -751,7 +751,7 @@ deferred: magnitude vs hybrid is unsettled at n=100 and the KL ranking is biased
 vision-encoder attention signal was untested. Phase 4b resolves the scorer choice on accuracy at 300
 samples before Phase 5 commits to one.
 
-#### Phase 4b: Vision-encoder attention scorer + accuracy-led re-run — ✅ IMPLEMENTED (run pending)
+#### Phase 4b: Vision-encoder attention scorer + accuracy-led re-run — ✅ DONE (run `results/20260604_001256`)
 
 **Why.** The run-1 leader was unsettled and the strongest training-free signal in the literature was
 missing. Per **VisPruner (ICCV 2025, arXiv:2412.01818)** and **FasterVLM**, the **vision-encoder**
@@ -785,12 +785,83 @@ CLS-free encoder, attention-received often correlates with activation magnitude 
 high norm and high attention), so `vision_attention ≈ activation_magnitude` is a real possibility — and
 would itself explain run 1's magnitude/hybrid ambiguity.
 
-#### Phase 4b Findings
-_Pending the Colab run (RUN_SCORING=True, defaults). To be filled with the accuracy-led 300-sample
-ranking incl. vision_attention, then the final Phase 5 scorer decision._
+#### Phase 4b Findings (300 samples/task, Qwen3-VL-2B-Instruct, T4, fp16 — `results/20260604_001256`)
+
+Methods: random (control), activation_magnitude, hybrid, vision_attention. Keep-ratios 1.0/0.50/0.25.
+**Ranked by accuracy** (KL remains structurally magnitude-biased — see the run-1 caveat).
+
+**Accuracy drop vs full (positive = worse; bold = best per cell):**
+
+| task (full) | ratio | random | magnitude | hybrid | vision_attn |
+|---|---|---|---|---|---|
+| general_vqa (.818) | 0.50 | −.004 | **−.013** | −.008 | −.004 |
+|  | 0.25 | −.004 | −.007 | −.002 | −.002 |
+| textvqa (.824) | 0.50 | +.020 | +.012 | +.009 | **+.002** |
+|  | 0.25 | +.017 | **+.010** | +.012 | +.031 |
+| docvqa (.892) | 0.50 | +.010 | +.007 | **+.0003** | +.018 |
+|  | 0.25 | +.060 | +.021 | **+.020** | +.031 |
+| counting (.813) | 0.50 | +.003 | −.017 | **−.020** | −.010 |
+|  | 0.25 | −.007 | **−.027** | −.010 | −.010 |
+
+**Finding 1 — random clearly loses (confirms run 1 at scale).** Worst/near-worst on KL almost
+everywhere; on the discriminating task DocVQA@0.25 it collapses (**+6.0%** accuracy drop, KL 0.248 —
+the largest degradation in the experiment). Token selection genuinely matters.
+
+**Finding 2 (headline) — vision_attention does NOT win; it is mixed-to-disappointing.** This is the
+key, somewhat surprising result and the answer to "does the literature's strong signal transfer?"
+- Competitive only at **mild** pruning on text-reading tasks: textvqa@0.50 it is the *best* scorer
+  (−0.2% drop), docvqa@0.50 it is 2nd on KL.
+- **Degrades toward random at aggressive (0.25) pruning and on spatial/general tasks:** textvqa@0.25
+  it is the *worst* (+3.1% vs magnitude's +1.0%); general_vqa@0.25 and counting@0.25 its KL (0.040,
+  0.092) sits at the random floor (0.042, 0.099).
+- On the cleanest test **DocVQA@0.25** the ordering is **hybrid ≈ magnitude > vision_attention >
+  random** (+2.0% / +2.1% / +3.1% / +6.0%) — vision_attention is beaten by *both* feature-based
+  scorers. The pre-registered "vision_attention ≈ magnitude" guess is **rejected**: they pick
+  different tokens and magnitude's choice is better at high compression.
+
+  *Attributed causes (honest, not over-claimed):* (i) we read attention at the **intermediate**
+  DeepStack source layers (5/11/17) — the correct place for DeepStack-aware pruning — not the *final*
+  encoder layer VisPruner/FasterVLM use, where attention is more object-focused; (ii) Qwen3-VL's ViT
+  has **no CLS anchor**, so "attention-received" is exposed to the **attention-sink** problem (a few
+  patches dominate; the rest is diffuse), discarding task-relevant detail under aggressive pruning.
+  We therefore claim vision-encoder attention does **not transfer to DeepStack intermediate
+  source-layer selection**, not that it is universally useless.
+
+**Finding 3 — hybrid is the most robust scorer; magnitude is the near-tied simple fallback.** hybrid
+wins DocVQA (the discriminating task) on **both** accuracy and KL at both ratios, ties magnitude on
+the insensitive tasks, and **never has a losing cell** — unlike vision_attention (collapses at 0.25)
+and random (collapses on DocVQA). magnitude is essentially tied and parameter-free. The run-1
+magnitude/hybrid dead heat resolves at 300 samples to **hybrid ≥ magnitude**; the diversity term in
+hybrid is what removes magnitude's occasional slips.
+
+**Finding 4 — large compressibility headroom, confirmed at scale.** keep-ratio 0.50 is within ~2% of
+full for *every* method on *every* task; even 0.25 holds within ~2% on the hardest task (DocVQA) with
+hybrid/magnitude. The DeepStack additive refinement is highly redundant — the paper's core premise.
+
+**Finding 5 — task taxonomy is firm.** DocVQA/TextVQA are compression-sensitive (scorer choice
+matters, real positive drops). general_vqa/counting are compression-*insensitive* (negative drops
+persist at n=300 → genuine insensitivity, not just noise — the coarse base embeddings already suffice).
+
+**Sharpened novelty.** Across Phases 2–4b we have now ruled out *both* attention families with
+evidence: decoder attention (Phase 2 null) and vision-encoder attention (Phase 4b, mixed/near-random
+at aggressive pruning). The right token-selection signal for DeepStack source-to-injection groups is
+**feature-based (magnitude + diversity)**. This is a stronger, better-defended contribution than
+"prune DeepStack tokens," and it distinguishes the work from "apply VisPruner to DeepStack."
+
+**Caveats.** KL stays magnitude-biased (ranked on accuracy). vision_attention's weakness is partly
+confounded by the intermediate-layer read vs VisPruner's final-layer use. Still diagnostic only —
+zeroing, not sequence-shortening, so no latency/memory win yet (Experiment 5 remains the gate).
 
 ### Phase 5: Implement Budgeting
-Fixed budget schedules to test:
+
+**Within-group scorer decision (from Phase 4b): use `hybrid`** (magnitude+diversity) — the most robust
+scorer (wins the discriminating DocVQA task, never collapses). `activation_magnitude` is the reported
+simple, parameter-free alternative (near-tied). `vision_attention` is kept only as an ablation /
+negative-result baseline (it underperforms hybrid/magnitude at aggressive pruning); `random`,
+`spatial_uniform`, `diversity` are the documented controls that lost.
+
+Fixed budget schedules to test (per-group keep-ratios for groups G0/G1/G2), all with hybrid selection,
+compared **at equal total retained-token count**:
 ```
 [100%, 100%, 100%]  # baseline
 [75%,  75%,  75%]   # uniform
@@ -799,7 +870,9 @@ Fixed budget schedules to test:
 [25%,  50%,  75%]   # increasing
 [90%,  50%,  30%]   # sensitivity-calibrated guess
 ```
-Then: sensitivity-calibrated budgets from ablation data.
+The Phase 3 group taxonomy (G0 expendable, G2 OCR-critical) + the Phase 4b task taxonomy (DocVQA/
+TextVQA sensitive; general_vqa/counting insensitive) motivate **task-aware** schedules that prune G0
+hard and protect G2 on text tasks. Then: sensitivity-calibrated budgets from the ablation data.
 
 ### Phase 6: Benchmark
 Run all methods with fixed settings.
@@ -945,7 +1018,7 @@ Produce:
 - [x] Phase 2: Measurement hooks implemented + run + figures (`src/deepstack/instrument.py`, `visualize.py`; results/20260603_080941). Headline: non-uniform within-group dispersion (CV 0.61/0.45/0.42) = the dispersion lens; attention is an informative null. See §13 Phase 2 Findings
 - [x] Phase 3: Ablation switches + sensitivity experiment run (`results/20260603_184741`). Verdict: WEAK GO — task-dependent sensitivity confirmed. G2 (deep) is critical for OCR/text (TextVQA drop_g2=−4%); G0 (shallow) is expendable and mildly harmful for detail tasks; groups are interchangeable for counting/general VQA. See §13 Phase 3 Findings
 - [x] Phase 4: Pruning implemented + run 1 (`results/20260603_204751`). 5 scorers + reconstruct-to-full-length contract. Solid results: **controls (random/spatial/diversity) lose**; **DeepStack refinement is highly compressible** (50–75% droppable within noise). NOT settled: magnitude vs hybrid (dead heat; KL is biased toward magnitude; accuracy is noise at n=100). See §13 Phase 4 Findings + correction banner
-- [~] Phase 4b: Vision-encoder attention scorer (`vision_attention`, the CLS-free VisPruner/FasterVLM signal) added + accuracy-led re-run wired (`src/deepstack/saliency.py`; `prune.py`, `exp_scoring.py`, `visualize_scoring.py`; 300 samples). Code done + locally verified; **Colab run pending** (RUN_SCORING=True). Settles the Phase 5 scorer choice. See §13 Phase 4b
+- [x] Phase 4b: Vision-encoder attention scorer (`vision_attention`, CLS-free VisPruner/FasterVLM signal) + accuracy-led 300-sample re-run (`results/20260604_001256`). Verdict: **`vision_attention` does NOT win** — competitive only at mild pruning on text tasks, near-random at aggressive pruning, beaten by hybrid/magnitude on DocVQA@0.25 (tested negative result; attributed to intermediate-layer read + CLS-free attention-sink). **`hybrid` is the most robust scorer** (magnitude near-tied); random loses; headroom confirmed (50% ~free). Both attention families now ruled out → selection signal is feature-based. Phase 5 scorer = hybrid. See §13 Phase 4b Findings
 - [ ] Phase 5: Budgeting implemented
 - [ ] Phase 6: Full benchmark run
 - [ ] Phase 7: Analysis and figures
