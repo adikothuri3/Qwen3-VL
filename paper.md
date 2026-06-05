@@ -7,83 +7,80 @@ https://colab.research.google.com/github/adikothuri3/Qwen3-VL/blob/main/colab_ru
 
 ---
 
-## 0. Paper Direction — Thesis & Line of Reasoning (current, set 2026-06-04)
+## 0. Paper Direction — Thesis & Line of Reasoning (current, **revised 2026-06-05 after the validate run**)
 
 > **Read this first.** This is the spine of the paper. Sections §1–§20 are the surrounding scaffold and
 > §13 holds the phase-by-phase evidence — but *this* section is the single, clear story the paper tells.
+> **The thesis flipped on 2026-06-05:** the held-out validation showed per-group/depth-aware budgeting does
+> **not** beat uniform. The paper is now a **compressibility characterization + two negative results**.
 
 ### Thesis (one sentence)
-> In DeepStack VLMs, **which** visual tokens to keep is **feature-based, not attention-based**, and
-> **how many** to keep is **depth- and task-structured** — so the right way to compress DeepStack's
-> redundant visual mass is a **feature-driven, task-aware, per-group token budget**, not uniform or
-> attention-guided pruning.
+> DeepStack's injected visual mass is **highly redundant**: a simple **feature-based UNIFORM** prune
+> removes **50–85% of the injected visual tokens at ≤~2% accuracy**. **Which** tokens to keep matters and
+> is **feature-based, not attention-based**; but **how** the budget is split across depth-groups does
+> **not** — **depth-aware per-group budgeting does not beat uniform**, because the depth-groups are
+> *mutually redundant*, so uniform allocation with a good within-group scorer is already near-optimal.
 
-### The line of reasoning (each step *motivates* the next — this is the narrative arc)
+### The line of reasoning (each step led to the next — this is the narrative arc)
 
-1. **Structure — the tokens are not uniform, and the non-uniformity is depth-ordered.**
-   Measuring the per-token feature distribution inside each DeepStack group (Phase 2) shows the groups
-   carry the *same token count* but very *different content*: the shallow group is highly dispersed
-   (a crowd of redundant tokens + a few outliers, CV ≈ 0.61) and the representation gets **denser /
-   more uniform with depth** (CV ≈ 0.45 → 0.42). Dense ⇒ little dead weight ⇒ fragile; dispersed ⇒
-   lots of removable redundancy. *This motivates giving each depth its own budget instead of one
-   global ratio.*
+1. **Structure — the tokens are non-uniform, and the non-uniformity is depth-ordered.**
+   Per-token feature distributions inside each DeepStack group (Phase 2) show the groups carry the *same
+   token count* but different *content*: the shallow group is highly dispersed (CV ≈ 0.61) and the
+   representation gets denser with depth (CV ≈ 0.45 → 0.42). This *motivated* the hypothesis that each
+   depth should get its own budget. **(Hypothesis — later rejected in step 3.)**
 
 2. **Selection — given a budget, the best way to choose which tokens to keep is feature-based.**
-   Holding the budget *uniform* across groups, we compared token-selection scorers (Phase 4/4b). Both
-   **attention families fail**: decoder attention is a null (Phase 2), and vision-encoder attention —
-   the VisPruner/FasterVLM SOTA signal — is only competitive at mild pruning and **decays to random at
+   Holding the budget *uniform*, we compared token-selection scorers (Phase 4/4b). Both **attention
+   families fail**: decoder attention is a null (Phase 2), and vision-encoder attention — the
+   VisPruner/FasterVLM SOTA signal — is only competitive at mild pruning and **decays to random at
    aggressive pruning** on the intermediate DeepStack source layers (Phase 4b). The robust signal is
-   **feature-based** (magnitude + diversity; `hybrid`, with `activation_magnitude` near-tied). *This
-   fixes the scorer — one feature-based scorer, justified by evidence — so the next step can vary only
-   the budget.*
+   **feature-based** (magnitude + diversity; `hybrid`, with `activation_magnitude` near-tied). **(Solid,
+   positive contribution.)**
 
-3. **Allocation — with the scorer fixed, the optimal per-group budget is task-dependent.**
-   We apply the chosen feature-based scorer and search the **per-group budget** `(r0,r1,r2)` (Phase 5
-   Stage A), per task. The shape of the budget follows the sensitivity found in Phase 3: the deep group
-   (G2, ViT L17) is **load-bearing for OCR/text** (protect it), the shallow group (G0) is **expendable
-   and mildly harmful on detail tasks** (cut it hard). So: **text-heavy tasks → asymmetric budget that
-   protects the deep group and starves the shallow one; coarse tasks (general VQA, counting) → uniform
-   pruning is already ~free.** *This is the "task-aware per-depth budgeting" contribution.*
+3. **Allocation — depth-aware per-group budgeting does NOT beat uniform (the hypothesis fails).**
+   The independent 1D sweeps (Phase 5 Stage-A sweep) *suggested* per-group structure — the deep group
+   (G2) looked fragile and the shallow group (G0) expendable **when pruned one at a time**. But the
+   held-out joint validation (Phase 5 validate, n=300, equal retained-token count, bootstrap CIs) showed
+   those budgets **do not transfer**: water-filled per-group budgets are **equal-or-worse than uniform on
+   every task at every budget**, and a flat **global top-k** also merely ties uniform. **Why:** the
+   depth-groups are **mutually redundant** — keeping a slice of *every* group (uniform) + a good scorer
+   already captures the cross-group-overlapping information, while concentrating cuts (zeroing a group)
+   discards that group's unique coverage for no compensating gain. *The single-group sweep effects were
+   real in isolation but an artifact of holding the other groups full.* **(Negative result — kept and
+   explained; this is a genuine contribution, not a failure to hide.)**
 
-4. **Realization — diagnose by zeroing, then measure real speed.**
-   Stage A uses **zeroing** (remove a group's additive refinement without shortening the sequence) —
-   the only way to vary the three groups *independently* and the correct tool for the accuracy search;
-   it carries no latency claim. **Stage B** (deferred) turns the chosen optimum into **real
-   sequence-shortening** and measures actual latency/memory on the Pareto frontier. *Efficiency is
-   estimated now and measured later.*
+4. **Compressibility — the strong positive result.** Because selection is what matters and the mass is
+   redundant, **feature-based uniform pruning compresses enormously**: General VQA keep **15% → −0.2%**,
+   TextVQA keep **30% → −0.3%**, DocVQA keep **50% → +0.2%** (held-out, n=300, equal token count, CIs).
+   The practical recommendation is therefore simple: *uniformly prune DeepStack tokens with a
+   magnitude/diversity scorer; don't bother with per-group budgets or attention scores.*
 
-**In the user's own words, untangled:** *"We see DeepStack groups have non-uniform structure that gets
-denser with depth → under a uniform budget, feature-based selection beats attention-based → we then
-give each group its own task-aware budget using that feature-based scorer, and find the optimal
-per-group budgets → finally we replace diagnostic zeroing with real pruning and measure the speedup."*
-
-> **Evidence update (2026-06-04, `results/20260604_232301`, the 3-task sweep at n=100):** the
-> **redundancy leg is the strongest** — you can zero an *entire* DeepStack injection group at ≤1% cost on
-> 2 of 3 tasks. The **per-group budgeting** claim's clean evidence is **TextVQA-anchored** (deep group
-> load-bearing −4%, shallow group expendable +1.3%); DocVQA's groups turned out *interchangeable* (any one
-> droppable ~free), so per-group is expected to *tie* uniform there. This sharpens — does not change — the
-> analysis-first direction: lead with redundancy, position per-group budgeting as the recipe validated
-> where it matters (TextVQA). The `validate` run is the make-or-break test. (See §13 Phase 5 sweep findings.)
+> **Honest arc summary:** *non-uniform feature structure → feature-based selection beats attention (yes)
+> → we hypothesized depth-aware per-group budgets would beat uniform → tested it rigorously on held-out
+> data → it does **not** (groups are mutually redundant) → the real win is that simple feature-based
+> uniform pruning is hugely compressible.*
 
 ### What this paper IS / IS NOT
-- **IS:** an **analysis-first paper that yields a concrete recipe** — built on three finished, defensible
-  findings (attention fails; sensitivity is depth/task-structured; the mass is ~50% redundant — *and you
-  can drop a whole injection group*), ending in a feature-based, task-aware per-group budgeting rule.
-- **IS NOT:** a "we tried N strategies" survey, and **not** a systems paper that lives or dies on the
-  latency number. Efficiency *supports* the thesis; it does not carry it.
+- **IS:** an **honest empirical analysis** of DeepStack visual-token redundancy — one strong positive
+  result (large compressibility under feature-based uniform pruning) and two clean negative results
+  (attention-based selection fails; depth-aware allocation does not beat uniform), with a clear practical
+  recommendation.
+- **IS NOT:** a "we beat SOTA" method paper, a survey, or a systems paper that lives or dies on a latency
+  number. It does **not** claim a per-group budgeting method — that hypothesis was tested and rejected.
 
-### Scope (locked)
-- **Tasks:** `general_vqa` (the "uniform pruning is ~free" / scalability result) + `docvqa`, `textvqa`
-  (where per-group budgeting beats uniform — G2 is OCR-critical). General VQA alone cannot support the
-  per-group claim, so it is never run alone.
-- **Scorer:** one fixed feature-based scorer (top tier `hybrid` ≈ `magnitude`; the tie is reported as a
-  *robustness* result — "any feature-based scorer works, attention-based ones don't"). The **budget**,
-  not the scorer, is what adapts to the task.
-- **Efficiency:** token-count reduction + projected latency now (Stage A); measured Pareto later (Stage B).
+### Scope (locked 2026-06-05 — analysis complete, no more large runs)
+- **Tasks:** `general_vqa`, `docvqa`, `textvqa` (sweep n=100 + validate held-out n=300 each).
+- **Scorer:** one fixed feature-based scorer (`hybrid` ≈ `activation_magnitude`; the tie is a
+  *robustness* result — "any feature-based scorer works, attention-based ones don't").
+- **Allocation:** uniform is the recommendation; per-group and global-top-k are reported as
+  tested-and-not-better baselines.
+- **Efficiency:** token-count reduction is reported now; **measured wall-clock latency (Stage B, real
+  sequence-shortening of the *uniform* prune) is optional future work**, not in scope.
 
-### Working title
-> **Task-Aware Per-Depth Token Budgeting for DeepStack Vision-Language Models**
-> *(feature-based selection + depth/task-calibrated per-group budgets).*
+### Working title (options)
+> **How Compressible Is DeepStack? Feature-Based Token Pruning and the Limits of Depth-Aware Budgeting**
+> — alt: *DeepStack Visual Tokens Are Redundant: Feature-Based Uniform Pruning Beats Attention-Based and
+> Depth-Aware Alternatives.*
 
 ---
 
@@ -161,18 +158,29 @@ This is the go/no-go experiment: if different groups show the same sensitivity, 
 ## 5. Research Questions
 
 | # | Question |
-|---|---|
-| RQ1 | Are DeepStack visual feature groups equally important? |
-| RQ2 | Does DeepStack-aware token budgeting beat uniform pruning? |
-| RQ3 | Does DeepStack-aware budgeting beat global attention pruning? |
-| RQ4 | Does it produce real speed/memory improvements? |
-| RQ5 | Which tasks are most sensitive to DeepStack compression? |
+| # | Question | Answer (as of 2026-06-05) |
+|---|---|---|
+| RQ1 | Are DeepStack visual feature groups equally important? | **Partly** — they differ when ablated *in isolation* (Phase 3/sweep), but are *mutually redundant* under joint pruning (validate). |
+| RQ2 | Does DeepStack-aware token budgeting beat uniform pruning? | **No** — per-group ≤ uniform on every task/budget at equal token count (Phase 5 validate, n=300). |
+| RQ3 | Does DeepStack-aware budgeting beat global attention pruning? | **No** — global top-k also just ties uniform; allocation strategy doesn't matter. |
+| RQ4 | Does it produce real speed/memory improvements? | **Not yet measured** — token-count reduction quantified; wall-clock latency is Stage B (future work). |
+| RQ5 | Which tasks are most sensitive to DeepStack compression? | **OCR/text** (TextVQA, DocVQA) > general VQA/counting; but all are highly compressible under uniform feature-based pruning. |
+
+*(RQ1–RQ3 were the original hypothesis. The honest finding is that the depth-structure does **not** yield
+an exploitable allocation advantage; the value is in the compressibility + the feature-based-selection
+result. See §0 and §13 Phase 5.)*
 
 ---
 
 ## 6. Method
 
-### Level 1: Per-DeepStack-group budget allocation
+> **Outcome note (2026-06-05):** Level 1 (per-group budget *allocation*) was the original hypothesis and
+> was **tested and rejected** — none of the allocation strategies below beats plain **Uniform** at equal
+> token count (§0, §13 Phase 5 validate). The method that survives is **Uniform allocation + Level-2
+> feature-based selection**; the other Level-1 strategies are reported as tested-and-not-better baselines.
+> Level 2 (which tokens to keep) is where the real signal is.
+
+### Level 1: Per-DeepStack-group budget allocation *(tested; uniform wins — see note above)*
 
 Each DeepStack visual feature group gets a separate token budget.
 
@@ -184,7 +192,7 @@ Each DeepStack visual feature group gets a separate token budget.
 | Attention/saliency-calibrated | Budget based on visual-token usefulness scores |
 | Task-aware (extension) | Different budget by task type |
 
-**Primary publishable method:** Sensitivity-calibrated DeepStack token budgeting — run a calibration set, estimate which DeepStack groups are more fragile, give them larger budgets.
+**Primary publishable method (revised 2026-06-05):** ~~Sensitivity-calibrated DeepStack token budgeting~~ — this was the hypothesis; the held-out validation showed sensitivity-calibrated/per-group allocation does **not** beat Uniform (the groups are mutually redundant). The actual recommendation is **Uniform allocation + a feature-based within-group scorer (Level 2)**, which is near-optimal and far simpler.
 
 ### Level 2: Within-group token selection
 
@@ -1027,22 +1035,53 @@ at r=0: random KL 0.057 vs magnitude 0.021). Decision stands: pin one feature-ba
 the hybrid≈magnitude tie is reported as a *robustness* result. **`validate` therefore pins `--scorer
 hybrid` and does NOT use the accuracy-noise auto-pick.**
 
-**Implication for the paper (per §0):** the analysis-first framing is confirmed by data. Redundancy +
-feature-based-selection + task-structured sensitivity are solid and reproduced; per-group budgeting is
-the actionable recipe, with its clean win expected on **TextVQA at aggressive total budgets** (hence the
-`validate` targets reach 0.15). The `validate` run is the make-or-break test of the method claim.
+**Implication of the sweep:** it *suggested* per-group structure (G2 fragile, G0 expendable) and motivated
+the joint `validate` test below. That test is what decides the method claim — and it rejects it.
 
-**Honest expectation for General VQA.** Phase 3/4b found it **compression-insensitive** (groups
-individually interchangeable; negative drops persisted at n=300). So the per-group-beats-uniform signal
-may be weak here — a tie with uniform is a plausible, *reportable* outcome ("General VQA tolerates
-aggressive uniform pruning; a simpler policy suffices"), and the large compressibility headroom + the
-empirical scorer choice remain solid, scalable results. The per-group contrast is expected to be
-strongest on OCR/text (DocVQA/TextVQA), which is **why those two tasks are now in the default 3-task
-run** rather than deferred — the General-VQA tie and the OCR/text win are the two halves of the §0
-taxonomy claim.
+#### Phase 5 Stage-A VALIDATE findings (held-out n=300, disjoint skip=100, `--scorer hybrid`, A100 fp16 — `results/20260605_050905`)
 
-The earlier fixed-schedule list (uniform / decreasing / increasing / sensitivity-calibrated guesses)
-is superseded by the data-driven water-filling search above.
+**This is the decisive, hypothesis-rejecting result.** Water-filled joint per-group budgets `(r0,r1,r2)`
+were run head-to-head vs **uniform** `(T,T,T)` and a flat **global top-k**, all at an **equal
+retained-token count**, on a held-out split disjoint from the sweep, with bootstrap 95% CIs. Scorer
+pinned to `hybrid` (the accuracy-noise auto-pick is disabled — it had chosen random/vision_attention).
+
+**Accuracy Δ vs the full model (%), at equal token count — `uniform` / `best per-group` / `global`:**
+
+| Task (base) | keep 50% | keep 30% | keep 20% | keep 15% |
+|---|---|---|---|---|
+| **general_vqa** (.818) | +0.3 / −0.3 / +0.8 | +0.4 / −0.4 / +0.4 | +0.3 / +0.1 / +0.1 | −0.2 / +0.1 / +0.2 |
+| **textvqa** (.822) | −0.2 / −2.1 / −2.3 | −0.3 / −2.1 / −2.1 | −2.0 / −1.7 / −1.7 | −2.9 / −2.1 / −3.0 |
+| **docvqa** (.884) | +0.2 / +0.1 / −1.2 | −1.8 / −2.2 / −2.7 | −2.6 / −2.8 / −3.2 | −2.5 / −2.6 / −2.6 |
+
+**Finding 1 — per-group budgeting does NOT beat uniform (RQ2 = No).** Best per-group is equal-or-worse
+than uniform in **every** task × budget cell. The only cells where per-group nominally edges uniform
+(textvqa/general at the most aggressive budgets) are ≤ +0.8% with **fully overlapping 95% CIs** — noise,
+not a win. KL is also consistently *higher* for per-group than uniform (zeroing whole groups perturbs the
+residual stream more), reinforcing that uniform is the gentler allocation.
+
+**Finding 2 — global top-k also just ties uniform (RQ3 = No).** Respecting DeepStack group boundaries in
+allocation is not necessary; ignoring them entirely (flat cross-group top-k) is no better either. **What
+matters is keeping a slice of each group + good within-group selection — not how the budget is split.**
+
+**Finding 3 (mechanism — the real science) — the sweep's per-group effects did not transfer because the
+groups are mutually redundant.** The independent 1D sweep saw "drop G0 is free, drop G2 hurts" *only
+because the other two groups were held full*. Under joint pruning the separable water-filling prediction
+breaks: e.g. TextVQA's water-filled 50%-budget `(0, 0.8, 0.7)` (zero G0) scores −2.1% while uniform
+`(0.5, 0.5, 0.5)` scores −0.2%. Keeping a fraction of every group preserves cross-group-overlapping
+information that concentrating the cuts throws away. **Uniform + a feature-based scorer is near-optimal.**
+
+**Finding 4 (the strong POSITIVE headline) — feature-based uniform pruning is hugely compressible.** At
+equal token count on held-out data: **General VQA keep 15% → −0.2%; TextVQA keep 30% → −0.3%; DocVQA keep
+50% → +0.2% / 30% → −1.8%.** DeepStack's injected visual mass is highly redundant; a simple uniform prune
+with the `hybrid` scorer removes 50–85% of it at ≤~2% accuracy. This is the paper's central result and
+yields the practical recommendation: *uniformly prune with a magnitude/diversity scorer; skip per-group
+budgets and attention scores.*
+
+**Verdict.** The per-group/depth-aware budgeting hypothesis (RQ2/RQ3) is **rejected** at held-out n=300.
+The paper's thesis flips accordingly (see §0): it is now a **compressibility characterization** (Finding
+4) plus **two clean negative results** (attention-based selection fails, Phase 4b; depth-aware allocation
+does not beat uniform, here). The earlier per-group framing and the fixed-schedule budget guesses are
+superseded. Stage B (real measured latency for the *uniform* feature-based prune) is optional future work.
 
 ### Phase 6: Benchmark
 Run all methods with fixed settings.
@@ -1071,19 +1110,25 @@ Produce:
 
 ---
 
-## 15. Success Criteria
+## 15. Success Criteria — outcome (updated 2026-06-05)
 
-| Criterion | Definition |
-|---|---|
-| Non-uniform sensitivity | Different groups tolerate different pruning levels |
-| Better than uniform pruning | At the same retained-token budget, higher accuracy |
-| Better than global pruning | Respecting DeepStack groups matters |
-| Real efficiency gain | Measurable latency or memory improvement |
-| Robustness on hard tasks | OCR/document/spatial performance does not collapse |
+> These were the *original* (method-paper) criteria. The held-out validation settled them: the "beats
+> uniform / beats global" criteria were **tested and not met**; the paper's value is the compressibility
+> characterization + the negative results (see §0). Outcome marked per row.
 
-**Good result:** 30–50% DeepStack visual-token reduction with less than 1–2% average accuracy drop and measurable latency/memory improvement.
+| Criterion | Definition | Outcome |
+|---|---|---|
+| Non-uniform sensitivity | Different groups tolerate different pruning levels | **Partial** — only in isolation; redundant jointly |
+| Better than uniform pruning | At the same retained-token budget, higher accuracy | **Not met** — per-group ≤ uniform (RQ2 No) |
+| Better than global pruning | Respecting DeepStack groups matters | **Not met** — global ≈ uniform (RQ3 No) |
+| Real efficiency gain | Measurable latency or memory improvement | **Not measured** — Stage B future work |
+| Robustness on hard tasks | OCR/document/spatial performance does not collapse | **Met** — uniform feature-based prune holds OCR within ~2% |
 
-**Great result:** DeepStack-aware budgeting beats uniform pruning across OCR, VQA, and spatial tasks at the same token budget.
+**Actual result (the paper's deliverable):** feature-based **uniform** pruning removes **50–85%** of
+DeepStack's injected visual tokens at **≤~2% accuracy** on held-out data (e.g. General VQA keep 15% →
+−0.2%, TextVQA keep 30% → −0.3%), with two clean negative results (attention-based selection fails;
+depth-aware/global allocation does not beat uniform). Latency measurement (Stage B) is the natural
+follow-up.
 
 ---
 
@@ -1093,7 +1138,7 @@ Produce:
 |---|---|
 | Token reduction does not improve latency (bottleneck stays in decoder) | Reframe around memory / quality-preserving compression, or pivot |
 | All DeepStack groups have similar sensitivity | Use global pruning or move to another idea |
-| Uniform pruning performs just as well | Method is overcomplicated; novelty collapses |
+| Uniform pruning performs just as well | **THIS TRIGGERED (2026-06-05).** Resolved deliberately, not by collapse: the paper pivots to a *compressibility characterization* + the honest negative result ("depth-aware allocation does not beat uniform; groups are mutually redundant"), with the attention-fails result and a clear practical recommendation as the contributions. |
 | OCR/spatial tasks collapse | Add task-sensitive budgets or preserve high-detail groups |
 | Dynamic pruning overhead erases gains | Use static calibration budgets or hardware-friendly pruning |
 
@@ -1150,7 +1195,7 @@ Produce:
 
 ## 18. One-Sentence Summary
 
-> This paper studies whether DeepStack-based vision-language models can run faster by reducing the number of visual tokens in each depth-specific DeepStack feature group, instead of pruning visual tokens globally or uniformly.
+> DeepStack's injected visual tokens are highly redundant: a simple feature-based **uniform** prune removes 50–85% of them at ≤~2% accuracy, feature-based selection beats attention-based selection, and **depth-aware per-group budgeting does not beat uniform** (the depth-groups are mutually redundant) — so the practical recipe is to uniformly prune with a magnitude/diversity scorer.
 
 ---
 
@@ -1189,6 +1234,7 @@ Produce:
 - [x] Phase 3: Ablation switches + sensitivity experiment run (`results/20260603_184741`). Verdict: WEAK GO — task-dependent sensitivity confirmed. G2 (deep) is critical for OCR/text (TextVQA drop_g2=−4%); G0 (shallow) is expendable and mildly harmful for detail tasks; groups are interchangeable for counting/general VQA. See §13 Phase 3 Findings
 - [x] Phase 4: Pruning implemented + run 1 (`results/20260603_204751`). 5 scorers + reconstruct-to-full-length contract. Solid results: **controls (random/spatial/diversity) lose**; **DeepStack refinement is highly compressible** (50–75% droppable within noise). NOT settled: magnitude vs hybrid (dead heat; KL is biased toward magnitude; accuracy is noise at n=100). See §13 Phase 4 Findings + correction banner
 - [x] Phase 4b: Vision-encoder attention scorer (`vision_attention`, CLS-free VisPruner/FasterVLM signal) + accuracy-led 300-sample re-run (`results/20260604_001256`). Verdict: **`vision_attention` does NOT win** — competitive only at mild pruning on text tasks, near-random at aggressive pruning, beaten by hybrid/magnitude on DocVQA@0.25 (tested negative result; attributed to intermediate-layer read + CLS-free attention-sink). **`hybrid` is the most robust scorer** (magnitude near-tied); random loses; headroom confirmed (50% ~free). Both attention families now ruled out → selection signal is feature-based. Phase 5 scorer = hybrid. See §13 Phase 4b Findings
-- [~] Phase 5: Budgeting — **Stage A SWEEP done** (3 tasks × 100 samples, `results/20260604_232301`); **validate is the next run** (pins `--scorer hybrid`, aggressive targets 0.5/0.3/0.2/0.15). Sweep verdict: r=0 anchors reproduce Phase 3 exactly (pipeline valid); **extreme redundancy** (drop a whole group ≤1% on general/doc); per-group structure clean on **TextVQA only** (G2 −4%, G0 +1.3%); **DocVQA groups interchangeable** (surprise — per-group expected to tie uniform there); scorer auto-pick is noise → `hybrid` pinned. Code: `src/deepstack/budget.py` + `src/experiments/exp_budgeting.py` (`sweep`/`validate`, `--tasks`, `--scorer`, one file per task) + `src/deepstack/visualize_budgeting.py`. Stage B (real sequence-shortening + latency) deferred. See §0 + §13 Phase 5 sweep findings
-- [ ] Phase 6: Full benchmark run
-- [ ] Phase 7: Analysis and figures
+- [x] Phase 5: Budgeting — **Stage A complete (sweep + validate).** Sweep `results/20260604_232301` (3×100); **validate `results/20260605_050905` (3 tasks × held-out 300, `--scorer hybrid`).** **VERDICT: per-group/depth-aware budgeting does NOT beat uniform (RQ2 No); global top-k also ties uniform (RQ3 No)** — the depth-groups are mutually redundant, so uniform + a feature-based scorer is near-optimal. **Positive headline: feature-based uniform pruning removes 50–85% of injected visual tokens at ≤~2% accuracy** (General VQA keep 15% → −0.2%; TextVQA keep 30% → −0.3%; DocVQA keep 50% → +0.2%). Thesis flipped (§0) to a compressibility characterization + the documented negative result. See §0 + §13 Phase 5 validate findings
+- [x] **Direction locked (2026-06-05): analysis paper.** Headline = DeepStack compressibility via feature-based uniform pruning; contributions = (1) compressibility, (2) attention-based selection fails, (3) depth-aware allocation does not beat uniform (negative result). No further large runs planned.
+- [ ] Stage B (optional future work): real sequence-shortening of the *uniform* feature-based prune → measured latency/memory Pareto.
+- [ ] Write-up: assemble the paper from §0 + §13 phase findings + figures.
