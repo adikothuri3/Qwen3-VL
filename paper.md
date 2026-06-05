@@ -7,6 +7,86 @@ https://colab.research.google.com/github/adikothuri3/Qwen3-VL/blob/main/colab_ru
 
 ---
 
+## 0. Paper Direction — Thesis & Line of Reasoning (current, set 2026-06-04)
+
+> **Read this first.** This is the spine of the paper. Sections §1–§20 are the surrounding scaffold and
+> §13 holds the phase-by-phase evidence — but *this* section is the single, clear story the paper tells.
+
+### Thesis (one sentence)
+> In DeepStack VLMs, **which** visual tokens to keep is **feature-based, not attention-based**, and
+> **how many** to keep is **depth- and task-structured** — so the right way to compress DeepStack's
+> redundant visual mass is a **feature-driven, task-aware, per-group token budget**, not uniform or
+> attention-guided pruning.
+
+### The line of reasoning (each step *motivates* the next — this is the narrative arc)
+
+1. **Structure — the tokens are not uniform, and the non-uniformity is depth-ordered.**
+   Measuring the per-token feature distribution inside each DeepStack group (Phase 2) shows the groups
+   carry the *same token count* but very *different content*: the shallow group is highly dispersed
+   (a crowd of redundant tokens + a few outliers, CV ≈ 0.61) and the representation gets **denser /
+   more uniform with depth** (CV ≈ 0.45 → 0.42). Dense ⇒ little dead weight ⇒ fragile; dispersed ⇒
+   lots of removable redundancy. *This motivates giving each depth its own budget instead of one
+   global ratio.*
+
+2. **Selection — given a budget, the best way to choose which tokens to keep is feature-based.**
+   Holding the budget *uniform* across groups, we compared token-selection scorers (Phase 4/4b). Both
+   **attention families fail**: decoder attention is a null (Phase 2), and vision-encoder attention —
+   the VisPruner/FasterVLM SOTA signal — is only competitive at mild pruning and **decays to random at
+   aggressive pruning** on the intermediate DeepStack source layers (Phase 4b). The robust signal is
+   **feature-based** (magnitude + diversity; `hybrid`, with `activation_magnitude` near-tied). *This
+   fixes the scorer — one feature-based scorer, justified by evidence — so the next step can vary only
+   the budget.*
+
+3. **Allocation — with the scorer fixed, the optimal per-group budget is task-dependent.**
+   We apply the chosen feature-based scorer and search the **per-group budget** `(r0,r1,r2)` (Phase 5
+   Stage A), per task. The shape of the budget follows the sensitivity found in Phase 3: the deep group
+   (G2, ViT L17) is **load-bearing for OCR/text** (protect it), the shallow group (G0) is **expendable
+   and mildly harmful on detail tasks** (cut it hard). So: **text-heavy tasks → asymmetric budget that
+   protects the deep group and starves the shallow one; coarse tasks (general VQA, counting) → uniform
+   pruning is already ~free.** *This is the "task-aware per-depth budgeting" contribution.*
+
+4. **Realization — diagnose by zeroing, then measure real speed.**
+   Stage A uses **zeroing** (remove a group's additive refinement without shortening the sequence) —
+   the only way to vary the three groups *independently* and the correct tool for the accuracy search;
+   it carries no latency claim. **Stage B** (deferred) turns the chosen optimum into **real
+   sequence-shortening** and measures actual latency/memory on the Pareto frontier. *Efficiency is
+   estimated now and measured later.*
+
+**In the user's own words, untangled:** *"We see DeepStack groups have non-uniform structure that gets
+denser with depth → under a uniform budget, feature-based selection beats attention-based → we then
+give each group its own task-aware budget using that feature-based scorer, and find the optimal
+per-group budgets → finally we replace diagnostic zeroing with real pruning and measure the speedup."*
+
+> **Evidence update (2026-06-04, `results/20260604_232301`, the 3-task sweep at n=100):** the
+> **redundancy leg is the strongest** — you can zero an *entire* DeepStack injection group at ≤1% cost on
+> 2 of 3 tasks. The **per-group budgeting** claim's clean evidence is **TextVQA-anchored** (deep group
+> load-bearing −4%, shallow group expendable +1.3%); DocVQA's groups turned out *interchangeable* (any one
+> droppable ~free), so per-group is expected to *tie* uniform there. This sharpens — does not change — the
+> analysis-first direction: lead with redundancy, position per-group budgeting as the recipe validated
+> where it matters (TextVQA). The `validate` run is the make-or-break test. (See §13 Phase 5 sweep findings.)
+
+### What this paper IS / IS NOT
+- **IS:** an **analysis-first paper that yields a concrete recipe** — built on three finished, defensible
+  findings (attention fails; sensitivity is depth/task-structured; the mass is ~50% redundant — *and you
+  can drop a whole injection group*), ending in a feature-based, task-aware per-group budgeting rule.
+- **IS NOT:** a "we tried N strategies" survey, and **not** a systems paper that lives or dies on the
+  latency number. Efficiency *supports* the thesis; it does not carry it.
+
+### Scope (locked)
+- **Tasks:** `general_vqa` (the "uniform pruning is ~free" / scalability result) + `docvqa`, `textvqa`
+  (where per-group budgeting beats uniform — G2 is OCR-critical). General VQA alone cannot support the
+  per-group claim, so it is never run alone.
+- **Scorer:** one fixed feature-based scorer (top tier `hybrid` ≈ `magnitude`; the tie is reported as a
+  *robustness* result — "any feature-based scorer works, attention-based ones don't"). The **budget**,
+  not the scorer, is what adapts to the task.
+- **Efficiency:** token-count reduction + projected latency now (Stage A); measured Pareto later (Stage B).
+
+### Working title
+> **Task-Aware Per-Depth Token Budgeting for DeepStack Vision-Language Models**
+> *(feature-based selection + depth/task-calibrated per-group budgets).*
+
+---
+
 ## 1. Core Idea
 
 Modern multimodal models are slow partly because images/videos produce many visual tokens. These tokens increase memory, prefill cost, and decoder-side workload. Profiling of Qwen3-VL shows that generation dominates total inference time: the text decoder takes 10,585.5 ms out of 12,084.8 ms total generation time, while the vision encoder took only 863.7 ms. Visual tokens matter not just because encoding is expensive, but because they inflate the decoder's workload.
@@ -852,14 +932,22 @@ at aggressive pruning). The right token-selection signal for DeepStack source-to
 confounded by the intermediate-layer read vs VisPruner's final-layer use. Still diagnostic only —
 zeroing, not sequence-shortening, so no latency/memory win yet (Experiment 5 remains the gate).
 
-### Phase 5: Implement Budgeting — Stage A IMPLEMENTED (run pending), task-specialized to General VQA
+### Phase 5: Implement Budgeting — Stage A IMPLEMENTED, multi-task (general_vqa, docvqa, textvqa)
 
-**Scope decision (2026-06-04).** Phase 5 is split into two stages and **specialized to a single task,
-General VQA (VQAv2)** — the most general, widely-used, scalable target. **Stage A** (this phase) finds,
-*for General VQA*, the optimal **per-group keep-budget** `(r0,r1,r2)` and the optimal **within-group
-scorer**, by **zeroing-based** pruning. **Stage B** (deferred, separate plan) realizes the chosen
-optimum as **real sequence-shortening** and benchmarks actual latency/memory vs. the baseline and other
-methods.
+**Scope decision (revised 2026-06-04).** Phase 5 is split into two stages and runs over **three tasks**
+(`general_vqa`, `docvqa`, `textvqa`) — the minimum that tells the whole story (§0): general VQA is the
+"uniform pruning is ~free" / scalability result, while DocVQA and TextVQA are where per-group budgeting
+*beats* uniform because the deep group (G2) is OCR-critical. **General VQA is not run alone — it cannot
+support the per-group-beats-uniform claim** (Phase 3/4b found its groups individually interchangeable).
+**Stage A** (this phase) finds, per task, the optimal **per-group keep-budget** `(r0,r1,r2)` and the
+optimal **within-group scorer**, by **zeroing-based** pruning. **Stage B** (deferred, separate plan)
+realizes the chosen optimum as **real sequence-shortening** and benchmarks actual latency/memory vs. the
+baseline and other methods.
+
+*(The earlier single-task "specialized to General VQA" framing is superseded: `exp_budgeting.py` now
+takes `--tasks` and writes one result file per task — `budgeting_sweep__<task>.json` /
+`budgeting_validation__<task>.json`. The 5-sample smoke run `results/20260604_220546` validated the
+pipeline end-to-end on General VQA; the full 3-task run is pending.)*
 
 **Why zeroing for Stage A, and the zeroing-vs-real-pruning distinction (they are NOT the same).**
 Confirmed against the model source: base visual tokens are scattered into the sequence
@@ -896,12 +984,62 @@ General VQA empirically.
   an **equal retained-token count**, with bootstrap 95% CIs. Writes `budgeting_validation.json` — the
   Stage-A deliverable (best scorer + best per-group budget + the per-group-vs-uniform-vs-global verdict).
 
+#### Phase 5 Stage-A SWEEP findings (3 tasks × 100 samples, Qwen3-VL-2B, A100, fp16 — `results/20260604_232301`)
+
+**The `sweep` ran for all three tasks (general_vqa, docvqa, textvqa); `validate` is the next run.**
+
+**Validity check — the r=0 endpoints reproduce Phase 3 *exactly* (built-in anchor).** Each per-group
+curve's keep-ratio=0 point should equal Phase 3's `drop_g{i}`. It does, for all 9 (task × group) cells
+(e.g. TextVQA drop_G2 = −4.0% in both experiments; DocVQA drop_G0 = +1.0% in both). Two independently
+coded experiments agreeing to ~3 decimals means the sweep machinery is correct and the curves *between*
+the endpoints are trustworthy.
+
+**Drop-a-whole-group (keep-ratio 0.0, Δ accuracy vs full, scorer-independent):**
+
+| Task (base) | drop G0 (shallow) | drop G1 (mid) | drop G2 (deep) | reading |
+|---|---|---|---|---|
+| general_vqa (.833) | −1.3% | +0.7% | 0.0% | flat — insensitive |
+| docvqa (.890) | +1.0% | +1.0% | +0.9% | flat — **groups interchangeable** |
+| textvqa (.840) | **+1.3%** | +0.3% | **−4.0%** | **the per-group signal** |
+
+**Finding 1 (headline) — extreme redundancy.** On general_vqa and docvqa you can **zero an entire
+DeepStack injection group (~33% of all injected refinement) at ≤1% accuracy cost**, and every
+single-group curve is flat down to very low keep-ratios. Combined with Phase 4b's "50% uniform is free
+everywhere," this is the paper's strongest, cleanest result: **DeepStack's added visual mass is heavily
+over-provisioned.**
+
+**Finding 2 — the clean per-group structure appears on TextVQA only.** There the deep group (G2) is
+load-bearing (−4.0% removed) and the shallow group (G0) is expendable and mildly *harmful* (+1.3%
+removed) — a textbook "protect G2, starve G0" case, and the dispersion-lens prediction (§4) realized.
+
+**Finding 3 — DocVQA surprise: its groups are interchangeable, not per-group-structured.** Contrary to
+the prior assumption that DocVQA would be a second per-group win, *any* single group (including G2) is
+droppable at ~0 cost; only collective removal hurts (Phase 3 drop_all = −5.3%). The groups carry
+overlapping document-layout information here. **Consequence:** the per-group-beats-uniform claim's clean
+evidence currently rests on **TextVQA**; on general_vqa and docvqa per-group budgeting is expected to
+*tie* uniform (the taxonomy half).
+
+**Finding 4 — scorer choice unchanged, and the auto-picker proves why.** The visualizer's accuracy-ranked
+"best scorer" came out **different per task** (hybrid / random / vision_attention) — which is *noise*,
+and is direct evidence that accuracy at n=100 cannot rank scorers. The reliable KL signal is consistently
+gentlest for **hybrid/magnitude** and worst for **random/vision_attention** on every task (e.g. DocVQA G0
+at r=0: random KL 0.057 vs magnitude 0.021). Decision stands: pin one feature-based scorer (**`hybrid`**);
+the hybrid≈magnitude tie is reported as a *robustness* result. **`validate` therefore pins `--scorer
+hybrid` and does NOT use the accuracy-noise auto-pick.**
+
+**Implication for the paper (per §0):** the analysis-first framing is confirmed by data. Redundancy +
+feature-based-selection + task-structured sensitivity are solid and reproduced; per-group budgeting is
+the actionable recipe, with its clean win expected on **TextVQA at aggressive total budgets** (hence the
+`validate` targets reach 0.15). The `validate` run is the make-or-break test of the method claim.
+
 **Honest expectation for General VQA.** Phase 3/4b found it **compression-insensitive** (groups
 individually interchangeable; negative drops persisted at n=300). So the per-group-beats-uniform signal
 may be weak here — a tie with uniform is a plausible, *reportable* outcome ("General VQA tolerates
 aggressive uniform pruning; a simpler policy suffices"), and the large compressibility headroom + the
-empirical scorer choice remain solid, scalable results. The per-group contrast is strongest on
-OCR/text (DocVQA/TextVQA) and can be added later.
+empirical scorer choice remain solid, scalable results. The per-group contrast is expected to be
+strongest on OCR/text (DocVQA/TextVQA), which is **why those two tasks are now in the default 3-task
+run** rather than deferred — the General-VQA tie and the OCR/text win are the two halves of the §0
+taxonomy claim.
 
 The earlier fixed-schedule list (uniform / decreasing / increasing / sensitivity-calibrated guesses)
 is superseded by the data-driven water-filling search above.
@@ -1051,6 +1189,6 @@ Produce:
 - [x] Phase 3: Ablation switches + sensitivity experiment run (`results/20260603_184741`). Verdict: WEAK GO — task-dependent sensitivity confirmed. G2 (deep) is critical for OCR/text (TextVQA drop_g2=−4%); G0 (shallow) is expendable and mildly harmful for detail tasks; groups are interchangeable for counting/general VQA. See §13 Phase 3 Findings
 - [x] Phase 4: Pruning implemented + run 1 (`results/20260603_204751`). 5 scorers + reconstruct-to-full-length contract. Solid results: **controls (random/spatial/diversity) lose**; **DeepStack refinement is highly compressible** (50–75% droppable within noise). NOT settled: magnitude vs hybrid (dead heat; KL is biased toward magnitude; accuracy is noise at n=100). See §13 Phase 4 Findings + correction banner
 - [x] Phase 4b: Vision-encoder attention scorer (`vision_attention`, CLS-free VisPruner/FasterVLM signal) + accuracy-led 300-sample re-run (`results/20260604_001256`). Verdict: **`vision_attention` does NOT win** — competitive only at mild pruning on text tasks, near-random at aggressive pruning, beaten by hybrid/magnitude on DocVQA@0.25 (tested negative result; attributed to intermediate-layer read + CLS-free attention-sink). **`hybrid` is the most robust scorer** (magnitude near-tied); random loses; headroom confirmed (50% ~free). Both attention families now ruled out → selection signal is feature-based. Phase 5 scorer = hybrid. See §13 Phase 4b Findings
-- [~] Phase 5: Budgeting — **Stage A implemented** (code only; Colab run pending). Specialized to General VQA; `src/deepstack/budget.py` + `src/experiments/exp_budgeting.py` (`sweep`/`validate`) + `src/deepstack/visualize_budgeting.py`. Independent per-group 5% sweep × all 4 scorers (zeroing), then water-filled joint budgets vs uniform vs global-topk at equal retained-token count. Stage B (real sequence-shortening + latency) deferred. See §13 Phase 5
+- [~] Phase 5: Budgeting — **Stage A SWEEP done** (3 tasks × 100 samples, `results/20260604_232301`); **validate is the next run** (pins `--scorer hybrid`, aggressive targets 0.5/0.3/0.2/0.15). Sweep verdict: r=0 anchors reproduce Phase 3 exactly (pipeline valid); **extreme redundancy** (drop a whole group ≤1% on general/doc); per-group structure clean on **TextVQA only** (G2 −4%, G0 +1.3%); **DocVQA groups interchangeable** (surprise — per-group expected to tie uniform there); scorer auto-pick is noise → `hybrid` pinned. Code: `src/deepstack/budget.py` + `src/experiments/exp_budgeting.py` (`sweep`/`validate`, `--tasks`, `--scorer`, one file per task) + `src/deepstack/visualize_budgeting.py`. Stage B (real sequence-shortening + latency) deferred. See §0 + §13 Phase 5 sweep findings
 - [ ] Phase 6: Full benchmark run
 - [ ] Phase 7: Analysis and figures

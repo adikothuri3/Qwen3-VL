@@ -353,13 +353,30 @@ def _validate_conditions(
     mean_n: int,
     step: float,
     n_candidates: int,
+    force_scorer: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    """Build the list of validate conditions. Returns (best_scorer, conditions).
+    """Build the list of validate conditions. Returns (chosen_scorer, conditions).
 
     Each condition: {key, type in {pergroup,uniform,global}, target, budget|None, scorer}.
     `global` budget is None (its keep-sets are computed per sample from embed norms).
+
+    `force_scorer` pins the within-group scorer (the locked decision: a fixed feature-based
+    scorer, default `hybrid` from Phase 4b). `budget.best_scorer` is the auto-pick fallback,
+    used only when force_scorer is None / "auto" / "none" — it ranks by accuracy at the
+    aggressive ratio, which at n=100 is pure noise (it picked random / vision_attention per
+    task on the 20260604_232301 sweep), so it must NOT drive the published budgets.
     """
-    best = budget.best_scorer(curves, scorers, num_groups) or scorers[0]
+    if force_scorer and force_scorer.lower() not in ("auto", "none"):
+        if force_scorer in scorers:
+            best = force_scorer
+        else:
+            print(
+                f"  [validate] forced scorer {force_scorer!r} not in swept {scorers}; falling back to auto-pick",
+                flush=True,
+            )
+            best = budget.best_scorer(curves, scorers, num_groups) or scorers[0]
+    else:
+        best = budget.best_scorer(curves, scorers, num_groups) or scorers[0]
     per_scorer = budget.curves_for_scorer(curves, best)
     conds: List[Dict[str, Any]] = []
     for t in targets:
@@ -400,10 +417,14 @@ def run_validate(
     sample_offset: Optional[int] = None,
     targets: Optional[List[float]] = None,
     n_candidates: int = 3,
+    scorer: Optional[str] = "hybrid",
     max_new_tokens: int = _DEFAULT_MAX_NEW_TOKENS,
 ) -> Dict[str, Dict[str, Any]]:
     """Validate joint budgets for each task; one file per task. Reads each task's
-    budgeting_sweep__<task>.json from `sweep_dir` (auto = latest if omitted)."""
+    budgeting_sweep__<task>.json from `sweep_dir` (auto = latest if omitted).
+
+    `scorer` pins the within-group scorer (default `hybrid`); pass "auto"/"none" to fall back
+    to the accuracy-noise auto-pick (not recommended — see _validate_conditions)."""
     task_list = tasks or list(_DEFAULT_TASKS)
     sdir = Path(sweep_dir) if sweep_dir else _find_sweep_dir(output_dir, task_list)
     if sdir is None:
@@ -425,7 +446,7 @@ def run_validate(
             try:
                 rep = _validate_one_task(
                     evaluator, pruner, task, str(sweep_path), out, num_groups, vision_layers,
-                    merge_size, target_list, num_samples, sample_offset, n_candidates, max_new_tokens,
+                    merge_size, target_list, num_samples, sample_offset, n_candidates, scorer, max_new_tokens,
                 )
                 reports[task] = rep
             except Exception as e:  # noqa: BLE001 — a bad task must not kill the others
@@ -446,6 +467,7 @@ def _validate_one_task(
     num_samples: int,
     sample_offset: Optional[int],
     n_candidates: int,
+    scorer: Optional[str],
     max_new_tokens: int,
 ) -> Dict[str, Any]:
     with open(sweep_path, encoding="utf-8") as f:
@@ -454,7 +476,9 @@ def _validate_one_task(
     step = float(sweep.get("step", _DEFAULT_STEP))
     mean_n = int(round(sweep.get("mean_tokens_per_group") or 0))
     curves, _ = budget.extract_curves(sweep)
-    best, conds = _validate_conditions(curves, scorers, num_groups, target_list, mean_n, step, n_candidates)
+    best, conds = _validate_conditions(
+        curves, scorers, num_groups, target_list, mean_n, step, n_candidates, scorer
+    )
     need_vision = best == _VISION
     print(f"[validate {task}] best_scorer={best}; {len(conds)} conditions", flush=True)
 
@@ -623,6 +647,10 @@ def main() -> None:
     vp.add_argument("--sample-offset", type=int, default=None, help="held-out skip; default = sweep samples")
     vp.add_argument("--targets", type=str, default=None, help="comma-separated avg keep-ratios; default 0.7,0.5,0.3")
     vp.add_argument("--n-candidates", type=int, default=3)
+    vp.add_argument(
+        "--scorer", type=str, default="hybrid",
+        help="within-group scorer to pin (default hybrid; 'auto'/'none' = accuracy-noise auto-pick, not recommended)",
+    )
 
     args = parser.parse_args()
     device = None if args.device in (None, "auto") else args.device
@@ -643,7 +671,7 @@ def main() -> None:
             model_id=args.model_id, sweep_dir=args.sweep_dir, device=device, dtype=dtype,
             output_dir=args.output_dir, num_samples=args.num_samples, tasks=tasks,
             sample_offset=args.sample_offset, targets=targets, n_candidates=args.n_candidates,
-            max_new_tokens=args.max_new_tokens,
+            scorer=args.scorer, max_new_tokens=args.max_new_tokens,
         )
 
 
