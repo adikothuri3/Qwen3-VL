@@ -1,0 +1,360 @@
+{
+  "phase": "stageA_validate",
+  "task": "general_vqa",
+  "sweep_source": "results/20260604_232301/budgeting_sweep__general_vqa.json",
+  "model_source": "/content/Qwen3-VL/local_transformers/models/qwen3_vl/modeling_qwen3_vl.py",
+  "device": "cuda",
+  "dtype": "float16",
+  "best_scorer": "hybrid",
+  "num_groups": 3,
+  "vision_layers": [
+    5,
+    11,
+    17
+  ],
+  "mean_tokens_per_group": 292,
+  "targets": [
+    0.5,
+    0.3,
+    0.2,
+    0.15
+  ],
+  "requested_samples": 300,
+  "sample_offset": 100,
+  "samples": 300,
+  "baseline_accuracy": 0.8177777777777778,
+  "conditions": {
+    "pergroup@0.50#0": {
+      "type": "pergroup",
+      "target": 0.5,
+      "budget": [
+        1.0,
+        0.3,
+        0.2
+      ],
+      "scorer": "hybrid"
+    },
+    "pergroup@0.50#1": {
+      "type": "pergroup",
+      "target": 0.5,
+      "budget": [
+        1.0,
+        0.35,
+        0.15
+      ],
+      "scorer": "hybrid"
+    },
+    "pergroup@0.50#2": {
+      "type": "pergroup",
+      "target": 0.5,
+      "budget": [
+        0.85,
+        0.5,
+        0.15
+      ],
+      "scorer": "hybrid"
+    },
+    "uniform@0.50": {
+      "type": "uniform",
+      "target": 0.5,
+      "budget": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "scorer": "hybrid"
+    },
+    "global@0.50": {
+      "type": "global",
+      "target": 0.5,
+      "budget": null,
+      "scorer": "activation_magnitude"
+    },
+    "pergroup@0.30#0": {
+      "type": "pergroup",
+      "target": 0.3,
+      "budget": [
+        0.85,
+        0.0,
+        0.05
+      ],
+      "scorer": "hybrid"
+    },
+    "pergroup@0.30#1": {
+      "type": "pergroup",
+      "target": 0.3,
+      "budget": [
+        0.85,
+        0.05,
+        0.0
+      ],
+      "scorer": "hybrid"
+    },
+    "pergroup@0.30#2": {
+      "type": "pergroup",
+      "target": 0.3,
+      "budget": [
+        0.9,
+        0.0,
+        0.0
+      ],
+      "scorer": "hybrid"
+    },
+    "uniform@0.30": {
+      "type": "uniform",
+      "target": 0.3,
+      "budget": [
+        0.3,
+        0.3,
+        0.3
+      ],
+      "scorer": "hybrid"
+    },
+    "global@0.30": {
+      "type": "global",
+      "target": 0.3,
+      "budget": null,
+      "scorer": "activation_magnitude"
+    },
+    "pergroup@0.20#0": {
+      "type": "pergroup",
+      "target": 0.2,
+      "budget": [
+        0.0,
+        0.4,
+        0.2
+      ],
+      "scorer": "hybrid"
+    },
+    "pergroup@0.20#1": {
+      "type": "pergroup",
+      "target": 0.2,
+      "budget": [
+        0.0,
+        0.45,
+        0.15
+      ],
+      "scorer": "hybrid"
+    },
+    "pergroup@0.20#2": {
+      "type": "pergroup",
+      "target": 0.2,
+      "budget": [
+        0.0,
+        0.5,
+        0.1
+      ],
+      "scorer": "hybrid"
+    },
+    "uniform@0.20": {
+      "type": "uniform",
+      "target": 0.2,
+      "budget": [
+        0.2,
+        0.2,
+        0.2
+      ],
+      "scorer": "hybrid"
+    },
+    "global@0.20": {
+      "type": "global",
+      "target": 0.2,
+      "budget": null,
+      "scorer": "activation_magnitude"
+    },
+    "pergroup@0.15#0": {
+      "type": "pergroup",
+      "target": 0.15,
+      "budget": [
+        0.0,
+        0.35,
+        0.1
+      ],
+      "scorer": "hybrid"
+    },
+    "pergroup@0.15#1": {
+      "type": "pergroup",
+      "target": 0.15,
+      "budget": [
+        0.0,
+        0.25,
+        0.2
+      ],
+      "scorer": "hybrid"
+    },
+    "pergroup@0.15#2": {
+      "type": "pergroup",
+      "target": 0.15,
+      "budget": [
+        0.0,
+        0.45,
+        0.0
+      ],
+      "scorer": "hybrid"
+    },
+    "uniform@0.15": {
+      "type": "uniform",
+      "target": 0.15,
+      "budget": [
+        0.15,
+        0.15,
+        0.15
+      ],
+      "scorer": "hybrid"
+    },
+    "global@0.15": {
+      "type": "global",
+      "target": 0.15,
+      "budget": null,
+      "scorer": "activation_magnitude"
+    }
+  },
+  "accuracy": {
+    "pergroup@0.50#0": 0.8144444444444445,
+    "pergroup@0.50#1": 0.8111111111111111,
+    "pergroup@0.50#2": 0.8077777777777778,
+    "uniform@0.50": 0.8211111111111111,
+    "global@0.50": 0.8255555555555555,
+    "pergroup@0.30#0": 0.8133333333333334,
+    "pergroup@0.30#1": 0.808888888888889,
+    "pergroup@0.30#2": 0.8133333333333334,
+    "uniform@0.30": 0.8222222222222223,
+    "global@0.30": 0.8222222222222223,
+    "pergroup@0.20#0": 0.818888888888889,
+    "pergroup@0.20#1": 0.8155555555555556,
+    "pergroup@0.20#2": 0.8177777777777778,
+    "uniform@0.20": 0.8211111111111111,
+    "global@0.20": 0.818888888888889,
+    "pergroup@0.15#0": 0.8177777777777778,
+    "pergroup@0.15#1": 0.818888888888889,
+    "pergroup@0.15#2": 0.8111111111111112,
+    "uniform@0.15": 0.8155555555555556,
+    "global@0.15": 0.8200000000000001
+  },
+  "accuracy_ci": {
+    "pergroup@0.50#0": [
+      0.7744444444444445,
+      0.8522222222222222
+    ],
+    "pergroup@0.50#1": [
+      0.7711111111111112,
+      0.85
+    ],
+    "pergroup@0.50#2": [
+      0.768888888888889,
+      0.8466666666666666
+    ],
+    "uniform@0.50": [
+      0.7811111111111111,
+      0.861111111111111
+    ],
+    "global@0.50": [
+      0.78775,
+      0.8622222222222223
+    ],
+    "pergroup@0.30#0": [
+      0.7733333333333333,
+      0.85
+    ],
+    "pergroup@0.30#1": [
+      0.768888888888889,
+      0.8455555555555554
+    ],
+    "pergroup@0.30#2": [
+      0.7733333333333333,
+      0.85
+    ],
+    "uniform@0.30": [
+      0.7833055555555556,
+      0.8588888888888888
+    ],
+    "global@0.30": [
+      0.7844444444444445,
+      0.8600277777777777
+    ],
+    "pergroup@0.20#0": [
+      0.78,
+      0.8566666666666667
+    ],
+    "pergroup@0.20#1": [
+      0.7755555555555557,
+      0.8544444444444443
+    ],
+    "pergroup@0.20#2": [
+      0.7777777777777777,
+      0.8555555555555554
+    ],
+    "uniform@0.20": [
+      0.7822222222222222,
+      0.8577777777777778
+    ],
+    "global@0.20": [
+      0.78,
+      0.8555555555555554
+    ],
+    "pergroup@0.15#0": [
+      0.7777777777777777,
+      0.8555555555555554
+    ],
+    "pergroup@0.15#1": [
+      0.78,
+      0.8566666666666667
+    ],
+    "pergroup@0.15#2": [
+      0.7711111111111111,
+      0.85
+    ],
+    "uniform@0.15": [
+      0.7755555555555556,
+      0.8533333333333334
+    ],
+    "global@0.15": [
+      0.7811111111111111,
+      0.8555833333333334
+    ]
+  },
+  "kl": {
+    "pergroup@0.50#0": 0.014561336712288124,
+    "pergroup@0.50#1": 0.015383415717689388,
+    "pergroup@0.50#2": 0.017103356909621795,
+    "uniform@0.50": 0.013936463956592255,
+    "global@0.50": 0.010801611839679077,
+    "pergroup@0.30#0": 0.032455490241721424,
+    "pergroup@0.30#1": 0.031414707438237724,
+    "pergroup@0.30#2": 0.03517518070467794,
+    "uniform@0.30": 0.024322999677360048,
+    "global@0.30": 0.0195501415195355,
+    "pergroup@0.20#0": 0.03992927211601521,
+    "pergroup@0.20#1": 0.038273559796465025,
+    "pergroup@0.20#2": 0.03795233580099108,
+    "uniform@0.20": 0.030423798361246923,
+    "global@0.20": 0.027478883707732084,
+    "pergroup@0.15#0": 0.041952322939817675,
+    "pergroup@0.15#1": 0.04429683649051426,
+    "pergroup@0.15#2": 0.044014538410177086,
+    "uniform@0.15": 0.03449418525109023,
+    "global@0.15": 0.03336433138679686
+  },
+  "retained_tokens": {
+    "pergroup@0.50#0": 412.51,
+    "pergroup@0.50#1": 412.48,
+    "pergroup@0.50#2": 412.51,
+    "uniform@0.50": 412.49,
+    "global@0.50": 412.53,
+    "pergroup@0.30#0": 247.53,
+    "pergroup@0.30#1": 247.53,
+    "pergroup@0.30#2": 247.53,
+    "uniform@0.30": 247.5,
+    "global@0.30": 247.53,
+    "pergroup@0.20#0": 165.01,
+    "pergroup@0.20#1": 165.01,
+    "pergroup@0.20#2": 164.98,
+    "uniform@0.20": 164.99,
+    "global@0.20": 165.0,
+    "pergroup@0.15#0": 123.7,
+    "pergroup@0.15#1": 123.76,
+    "pergroup@0.15#2": 123.76,
+    "uniform@0.15": 123.75,
+    "global@0.15": 123.73
+  }
+}
